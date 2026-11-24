@@ -110,3 +110,18 @@ All jobs: account ai4wy-eap, partition gp-1, outputs only under /project/ai4wy-e
 | 3 | Windows/tokens, handcrafted baseline + HMM, probes on old embeddings | CPU jobs | to be written after stage 2 results |
 | 4 | SimCLR training + sweeps/ablations | 1× H200 per run, ≤24 h with resume | to be written; separate approval |
 | 5 | Analysis suite M0–M8 | CPU (+1 GPU for UMAP if needed) | to be written |
+
+## 5. Stage 2 results (profile_v2, 2026-11-24)
+
+- **Sampling.** GPS is recorded at 1 Hz in runs: median run 9 s, upper quartile ≥152 s, 10% reach the 899 s
+  (15 min) cap; 4,051 h of 1 Hz GPS in total. No GPS runs start between local solar 21:00 and 03:00 (tags do not
+  record GPS at night). Accelerometry totals 6,056 h: 60% of it in continuous 5–60 min segments (16,436 segments),
+  the rest in 2 s and 13.2 s bursts. 92% of accelerometer bursts lie within 2 s of a GPS fix, so the two streams
+  are recorded together.
+- **Calibration.** After splitting each tag into sensitivity periods, 88 tag-periods with ≥50 still bursts give
+  gains of 0.94–1.11 × the published 512 counts/g (median 1.01) and a median still-burst error of 0.0085 g.
+  33 of 62 birds had periods at double sensitivity (~1024 counts/g), mostly April–September 2025. Two periods are
+  unreliable (one with 18 still bursts; one isolated single day).
+- **Consequence for the window.** The natural unit is a 10 s co-recorded window: 10 GPS fixes at 1 Hz plus 200
+  accelerometer samples × 3 axes at 20 Hz. Short recording bouts give one window each; long continuous segments
+  give consecutive windows, which also provide sequences for temporal models. Roughly 2.5 M windows (estimate).

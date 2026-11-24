@@ -44,10 +44,11 @@ def published_slope(tag_id: str) -> float:
 
 def _attach_gps(t: pd.Series, fixes: pd.DataFrame, tol_s: float) -> pd.DataFrame:
     """Nearest good GPS fix (time, lon, lat, ground speed) within ``tol_s`` of each time in ``t``."""
-    left = pd.DataFrame({"timestamp": t.to_numpy()}).reset_index(names="row")
+    left = pd.DataFrame({"timestamp": pd.Series(t.to_numpy()).astype("datetime64[ns]")}).reset_index(names="row")
     if fixes.empty:
         return pd.DataFrame(index=left["row"], columns=["gps_dt_s", gps.LON, gps.LAT, gps.SPEED], dtype=float)
     right = fixes[["timestamp", gps.LON, gps.LAT, gps.SPEED]].copy()
+    right["timestamp"] = right["timestamp"].astype("datetime64[ns]")
     right["gps_time"] = right["timestamp"]
     m = pd.merge_asof(
         left.sort_values("timestamp"),

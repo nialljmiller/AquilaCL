@@ -11,12 +11,14 @@
 set -euo pipefail
 source "$HOME/opt/miniforge3/etc/profile.d/conda.sh"; conda activate aquilacl
 ROOT=/project/ai4wy-eap/nmille39/aquilacl
-DATA=$ROOT/data
+DATA=${DATA:-$ROOT/data}
+PROFILE=${PROFILE:-$DATA/profile_v2}
+RESULTS=${RESULTS:-$ROOT/results}
 OLD=/project/ai4wy-eap/nmille39/GoldenEAI/logs/main/00030000_embeddings.csv
 echo "== windows $(date)"
-python -m aquilacl.windows "$DATA" --profile "$DATA/profile_v2" --out "$DATA/windows_10s" --workers $(( SLURM_CPUS_PER_TASK - 4 ))
+python -m aquilacl.windows "$DATA" --profile "$PROFILE" --out "$DATA/windows_10s" --workers $(( SLURM_CPUS_PER_TASK - 4 ))
 echo "== baseline $(date)"
-python -m aquilacl.baseline "$DATA/windows_10s" --out "$ROOT/results/baseline_v1"
+python -m aquilacl.baseline "$DATA/windows_10s" --out "$RESULTS/baseline_v1"
 echo "== probes on old embeddings $(date)"
-python -m aquilacl.probes old --embeddings "$OLD" --windows "$DATA/windows_10s" --events "$DATA/events" --out "$ROOT/results/probes_old"
+python -m aquilacl.probes old --embeddings "$OLD" --windows "$DATA/windows_10s" --events "$DATA/events" --out "$RESULTS/probes_old"
 echo "== done $(date)"

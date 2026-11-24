@@ -93,6 +93,12 @@ def parse_packed(col: pa.ChunkedArray | pa.Array, value_type: pa.DataType) -> pa
     return pc.cast(parts, pa.list_(value_type))
 
 
+def normalise_bird(col):
+    """Newer Movebank exports write the animal as "<animal>; <tag>"; keep the animal part."""
+    first = pc.list_element(pc.split_pattern(col, ";"), 0)
+    return pc.utf8_trim_whitespace(first)
+
+
 def _column_types() -> dict[str, pa.DataType]:
     types = dict(COMMON)
     types[SENSOR] = pa.string()
@@ -107,8 +113,9 @@ def stream_split(csv_path: Path, out: Path, block_mb: int = 256) -> dict[tuple[s
     if raw.exists() and any(raw.rglob("*.parquet")):
         raise FileExistsError(f"{raw} already holds parquet files; use a new output directory")
     types = _column_types()
+    # .zst/.gz/.bz2 inputs are decompressed on the fly (detected from the extension)
     reader = pacsv.open_csv(
-        csv_path,
+        pa.input_stream(str(csv_path)),
         read_options=pacsv.ReadOptions(block_size=block_mb << 20),
         convert_options=pacsv.ConvertOptions(
             column_types=types,
@@ -122,6 +129,7 @@ def stream_split(csv_path: Path, out: Path, block_mb: int = 256) -> dict[tuple[s
     try:
         for batch in reader:
             table = pa.Table.from_batches([batch])
+            table = table.set_column(table.schema.get_field_index(BIRD), BIRD, normalise_bird(table[BIRD]))
             for sensor, cols in STREAMS.items():
                 part = table.filter(pc.equal(table[SENSOR], sensor))
                 if part.num_rows == 0:

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -110,3 +112,26 @@ def test_kinematics_thermal_and_gap():
     s = gps.run_summary(k)
     assert abs(s["net_turn_deg"].iloc[0]) > 360 * 3
     assert np.isnan(k[k.run == k.run.max()]["climb_ms"].iloc[0])  # no rate across the gap
+
+
+
+def test_normalise_bird_and_compressed_ingest(tmp_path):
+    """New-style "<animal>; <tag>" IDs are cut to the animal; a .zst export is read directly."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from aquilacl import ingest
+
+    col = pa.array(["0749-00032; 18261", "0799-02952", None])
+    assert ingest.normalise_bird(col).to_pylist() == ["0749-00032", "0799-02952", None]
+    src = Path(__file__).parents[2] / "reference" / "GoldenEAI_sample.csv"
+    if not src.exists():
+        pytest.skip("sample CSV not available")
+    text = src.read_text().replace(",0799-02952,", ",0799-02952; 14845,")
+    zst = tmp_path / "export.csv.zst"
+    with pa.output_stream(str(zst), compression="zstd") as f:
+        f.write(text.encode())
+    counts = ingest.stream_split(zst, tmp_path / "out")
+    assert sum(counts.values()) == 200
+    birds = {b for _, b in counts}
+    assert "0799-02952" in birds and not any(";" in b for b in birds)

@@ -10,5 +10,5 @@
 #SBATCH --output=/project/ai4wy-eap/nmille39/aquilacl/logs/%x_%j.log
 set -euo pipefail
 source "$HOME/opt/miniforge3/etc/profile.d/conda.sh"; conda activate aquilacl
-DATA=/project/ai4wy-eap/nmille39/aquilacl/data
+DATA=${DATA:-/project/ai4wy-eap/nmille39/aquilacl/data}
 python -m aquilacl.profile "$DATA" --out "${OUT:-$DATA/profile}" --workers $(( SLURM_CPUS_PER_TASK - 2 ))

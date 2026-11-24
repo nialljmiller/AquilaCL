@@ -14,9 +14,10 @@ set -euo pipefail
 source "$HOME/opt/miniforge3/etc/profile.d/conda.sh"; conda activate aquilacl
 ROOT=/project/ai4wy-eap/nmille39/aquilacl
 : "${RUN:?set RUN to a run name}"
+DATA=${DATA:-$ROOT/data}
 nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv
 echo "== train $RUN $(date)"
-python -m aquilacl.train --windows "$ROOT/data/windows_10s" --run "$ROOT/runs/$RUN" "$@"
+python -m aquilacl.train --windows "$DATA/windows_10s" --run "$ROOT/runs/$RUN" "$@"
 echo "== evaluate $RUN $(date)"
-python -m aquilacl.evaluate --run "$ROOT/runs/$RUN" --windows "$ROOT/data/windows_10s" --events "$ROOT/data/events"
+python -m aquilacl.evaluate --run "$ROOT/runs/$RUN" --windows "$DATA/windows_10s" --events "$DATA/events"
 echo "== done $(date)"

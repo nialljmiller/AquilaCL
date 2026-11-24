@@ -3,7 +3,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from goldeneai import gps, profile
+from aquilacl import gps, profile
 
 GAIN, OFFSET = 1000.0, np.array([2040.0, 2055.0, 2035.0])
 

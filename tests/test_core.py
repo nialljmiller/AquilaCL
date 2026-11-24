@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from goldeneai import acc, gps, solar
+from aquilacl import acc, gps, solar
 
 
 def _postures(rng, n, max_tilt_deg):

@@ -1,5 +1,5 @@
 [project]
-name = "goldeneai"
+name = "aquilacl"
 version = "0.1.0"
 description = "Self-supervised representation learning of golden eagle movement and behaviour from GPS-accelerometer biologging data"
 authors = [{ name = "Niall Miller" }]
@@ -12,7 +12,7 @@ analysis = ["umap-learn", "matplotlib"]
 dev = ["pytest"]
 
 [project.scripts]
-goldeneai-ingest = "goldeneai.ingest:main"
+aquilacl-ingest = "aquilacl.ingest:main"
 
 [build-system]
 requires = ["setuptools>=68"]

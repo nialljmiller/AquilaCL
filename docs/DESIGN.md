@@ -1,4 +1,4 @@
-# GoldenEAI v2: design
+# AquilaCL: design
 
 Goal (Nill, 2026-11-24): capture all distinct movements and behaviours of the tagged golden eagles and
 characterise them through a SimCLR latent space.
@@ -19,9 +19,9 @@ characterise them through a SimCLR latent space.
 
 ## 2. New pipeline
 
-1. **Ingest** (`goldeneai.ingest`): stream the 18 GB CSV once into sorted per-bird, per-sensor Parquet with burst
+1. **Ingest** (`aquilacl.ingest`): stream the 18 GB CSV once into sorted per-bird, per-sensor Parquet with burst
    columns parsed to integer arrays. Refuses to write into an existing output.
-2. **Calibrate and profile** (`goldeneai.acc`, `goldeneai.gps`): per-tag accelerometer offset/gain fitted from still
+2. **Calibrate and profile** (`aquilacl.acc`, `aquilacl.gps`): per-tag accelerometer offset/gain fitted from still
    bursts (|g| = 1); GPS quality filter; continuous GPS runs with climb rate and turn rate from actual fix times;
    a sampling-schedule profile per tag and month (burst lengths and intervals, GPS cadence). The schedule profile
    decides the window length below.
@@ -95,16 +95,16 @@ gp-1: 12 nodes, 1× H200, 72 CPU, 572 GB; 11 idle. gp-2: 24 nodes, 2× H200, 144
 busy with 24 h array jobs. Nodes are aarch64. Max wall time 24 h. `sbatch --test-only` confirmed that gp-1 accepts
 CPU-only jobs and single-GPU jobs. The model needs one GPU; gp-1 is used throughout.
 
-All outputs go to the new directory `/project/ai4wy-eap/nmille39/goldeneai_v2/`. The existing checkout,
+All outputs go to the new directory `/project/ai4wy-eap/nmille39/aquilacl/`. The existing checkout,
 `logs/main`, `golden_eai_outputs` and the `ai4wy` conda env are not modified.
 
 ## 4. Run plan on AI4WY
 
-All jobs: account ai4wy-eap, partition gp-1, outputs only under /project/ai4wy-eap/nmille39/goldeneai_v2/.
+All jobs: account ai4wy-eap, partition gp-1, outputs only under /project/ai4wy-eap/nmille39/aquilacl/.
 
 | Stage | What | Request | Status |
 |---|---|---|---|
-| 0 | New env `goldeneai`, cloned from `ai4wy`, + pyarrow; run tests | login node, install only | awaiting approval |
+| 0 | New env `aquilacl`, cloned from `ai4wy`, + pyarrow; run tests | login node, install only | awaiting approval |
 | 1 | Ingest CSV -> Parquet with exact-count check (`slurm/01_ingest.sh`) | 32 CPU, 256 GB, 6 h, no GPU | awaiting approval |
 | 2 | Schedule profile, calibration, burst features, GPS kinematics (`slurm/02_profile.sh`) | 64 CPU, 400 GB, 8 h, no GPU | awaiting approval |
 | 3 | Windows/tokens, handcrafted baseline + HMM, probes on old embeddings | CPU jobs | to be written after stage 2 results |

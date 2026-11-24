@@ -1,6 +1,6 @@
 """Stage 2: sampling-schedule profile, accelerometer calibration and per-observation features.
 
-Reads ``<data>/events`` (from ``goldeneai.ingest``) and writes, under ``<data>/profile``:
+Reads ``<data>/events`` (from ``aquilacl.ingest``) and writes, under ``<data>/profile``:
 
     schedule.csv             per bird and UTC month: bursts by length, burst interval, GPS cadence, 1 Hz runs
     calibration.csv          per bird/tag: fitted offset and gain, model, condition, posture spread, and the
@@ -194,7 +194,7 @@ def profile_bird(events: Path, bird: str, out: Path, still_sd_counts: float, sti
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("data", type=Path, help="directory that holds events/ from goldeneai.ingest")
+    ap.add_argument("data", type=Path, help="directory that holds events/ from aquilacl.ingest")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--still-sd-counts", type=float, default=8.0)
     ap.add_argument("--still-gps-s", type=float, default=120.0)

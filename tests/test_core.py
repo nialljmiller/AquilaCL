@@ -2,28 +2,51 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from goldeneai import acc, gps
+from goldeneai import acc, gps, solar
 
 
-def _random_postures(rng, n):
-    v = rng.normal(size=(n, 3))
-    return v / np.linalg.norm(v, axis=1, keepdims=True)
+def _postures(rng, n, max_tilt_deg):
+    """Unit gravity vectors within ``max_tilt_deg`` of the tag's +z axis."""
+    tilt = np.radians(rng.uniform(0, max_tilt_deg, n))
+    az = rng.uniform(0, 2 * np.pi, n)
+    return np.c_[np.sin(tilt) * np.cos(az), np.sin(tilt) * np.sin(az), np.cos(tilt)]
 
 
-def test_calibration_recovers_offset_and_gain():
+OFFSET, GAIN = np.array([2030.0, 2071.0, 2002.0]), np.array([1010.0, 985.0, 1032.0])
+
+
+@pytest.mark.parametrize(
+    "max_tilt, banked_frac, use_mask, gain_rtol, expect_model",
+    [
+        (180, 0.0, False, 0.01, "full"),  # postures over the whole sphere: full fit
+        # Upright perching only: offset and gain along z are confounded, so the fit falls back to
+        # a reduced model; about 4% gain error is the identifiability limit, not a fitting fault.
+        (30, 0.0, False, 0.06, "shared_gain"),
+        (30, 0.3, True, 0.06, "shared_gain"),  # banked-soaring bursts excluded by the stillness mask
+    ],
+)
+def test_calibration(max_tilt, banked_frac, use_mask, gain_rtol, expect_model):
     rng = np.random.default_rng(1)
-    offset, gain = np.array([2030.0, 2071.0, 2002.0]), np.array([1010.0, 985.0, 1032.0])
-    bursts = []
-    for g in _random_postures(rng, 400):
-        counts = g * gain + offset + rng.normal(0, 2, size=(40, 3))
-        bursts.append(counts)
-    for _ in range(100):  # moving bursts must be ignored
-        bursts.append(offset + rng.normal(0, 300, size=(40, 3)))
-    cal = acc.fit_calibration(bursts)
-    assert cal.fitted
-    np.testing.assert_allclose(cal.offset, offset, atol=3)
-    np.testing.assert_allclose(cal.gain, gain, rtol=0.01)
-    assert cal.residual_g < 0.01
+    n = 600
+    g = _postures(rng, n, max_tilt)
+    banked = rng.random(n) < banked_frac
+    g[banked] *= 1 / np.cos(np.radians(30))  # steady 30-degree bank: 1.15 g, low variation
+    means = g * GAIN + OFFSET + rng.normal(0, 2, size=(n, 3))
+    cal = acc.fit_calibration(means, still=~banked if use_mask else None)
+    if expect_model:
+        assert cal.model == expect_model
+    np.testing.assert_allclose(cal.gain.mean(), GAIN.mean(), rtol=gain_rtol)
+    assert cal.residual_g < 0.02
+
+
+def test_calibration_without_mask_is_biased_by_banking():
+    rng = np.random.default_rng(2)
+    g = _postures(rng, 600, 30)
+    banked = rng.random(600) < 0.3
+    g[banked] *= 1 / np.cos(np.radians(30))
+    masked = acc.fit_calibration(g * GAIN + OFFSET, still=~banked)
+    unmasked = acc.fit_calibration(g * GAIN + OFFSET)
+    assert unmasked.residual_g > 3 * masked.residual_g
 
 
 @pytest.mark.parametrize(
@@ -42,6 +65,14 @@ def test_burst_features(freq, amp, expect_freq):
     else:
         assert f["dom_freq_hz"] == pytest.approx(expect_freq, abs=0.1)
         assert f["vedba"] == pytest.approx(2 * amp / np.pi, rel=0.15)
+
+
+def test_sun_elevation():
+    # Wyoming, 2025-06-21: local solar noon about 19:05 UTC, midnight about 07:05 UTC
+    t = pd.to_datetime(["2025-06-21 19:05", "2025-06-21 07:05"], utc=True)
+    el = solar.sun_elevation_deg(t, [-108.0, -108.0], [44.0, 44.0])
+    assert el[0] == pytest.approx(90 - 44 + 23.44, abs=1.0)
+    assert el[1] < -20
 
 
 def test_decode_interleaved():

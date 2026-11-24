@@ -177,9 +177,28 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("out", type=Path, help="new output directory")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--block-mb", type=int, default=256)
+    ap.add_argument(
+        "--expect",
+        nargs="*",
+        default=[],
+        metavar="SENSOR=ROWS",
+        help="known row counts (e.g. gps=14876799, total=..., birds=62); exit non-zero on mismatch",
+    )
     args = ap.parse_args(argv)
     counts = stream_split(args.csv, args.out, args.block_mb)
     print(f"split {sum(counts.values()):,} rows into {len(counts)} files")
+    observed = {"total": sum(counts.values()), "birds": len({b for _, b in counts})}
+    for (sensor, _), n in counts.items():
+        observed[sensor] = observed.get(sensor, 0) + n
+    bad = []
+    for item in args.expect:
+        key, want = item.split("=")
+        got = observed.get(key, 0)
+        print(f"check {key}: expected {int(want):,}, got {got:,}")
+        if got != int(want):
+            bad.append(key)
+    if bad:
+        raise SystemExit(f"row counts differ from the known values for: {', '.join(bad)}")
     for path, n_in, n_out in finalize(args.out, args.workers):
         if n_in != n_out:
             print(f"{path}: removed {n_in - n_out} repeated event ids")

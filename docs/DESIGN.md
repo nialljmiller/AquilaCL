@@ -75,10 +75,17 @@ as a random effect; time of day is local solar time; every threshold lives in th
   a false-negative-tolerant loss variant tested (Qian et al. 2022: >128 negatives hurt SimCLR on activity data).
 - **Augmentations.** Noise, ±10% scaling, ±10–15° rotation, crops, cutout, token thinning, modality dropout. No full
   rotations, axis swaps, shuffling, strong time-warp or reversal (they destroy pitch, wingbeat and climb direction).
-- **Acceptance test (fixed before training).** Linear probes on held-out birds: bird, cohort, cadence and burst
-  length near chance; rule-derived flapping, circling, gliding, perched and night labels high (labels used only for
-  evaluation). Baseline: handcrafted features + HMM (momentuHMM-style). Diel results indexed by sun elevation;
-  night is the roosting control.
+- **Acceptance test (fixed before training).** Linear probes on held-out birds.
+  - Device nuisances should be near chance: magnetometer vs no magnetometer *within the 2024 cohort* (five
+    2024 birds have none), decoding-software version within a bird, burst length, GPS cadence.
+  - Behaviour should be high: rule-derived flapping, circling, gliding, perched and night labels (used only for
+    evaluation), VeDBA, wingbeat band power, climb and turn rate.
+  - Cohort is NOT a pass/fail criterion: here cohort is entangled with age and season (2025 = mostly territorial
+    adults seen Oct–Mar; 2024 = mostly nestlings), so hiding it would erase real age and season behaviour. Cohort
+    is reported descriptively in calendar months where both cohorts have data.
+  - The same probes are run on the old step-30k embeddings, so "improved" is measured against numbers.
+  - Baseline: handcrafted features + HMM (momentuHMM-style). Diel results indexed by sun elevation; night is the
+    roosting control.
 - **States.** HDBSCAN/GMM in the embedding itself, not in UMAP. Kept only if stable across bird-level bootstrap and
   seeds, present in ≥5 birds and in more than one cohort.
 
@@ -90,3 +97,16 @@ CPU-only jobs and single-GPU jobs. The model needs one GPU; gp-1 is used through
 
 All outputs go to the new directory `/project/ai4wy-eap/nmille39/goldeneai_v2/`. The existing checkout,
 `logs/main`, `golden_eai_outputs` and the `ai4wy` conda env are not modified.
+
+## 4. Run plan on AI4WY
+
+All jobs: account ai4wy-eap, partition gp-1, outputs only under /project/ai4wy-eap/nmille39/goldeneai_v2/.
+
+| Stage | What | Request | Status |
+|---|---|---|---|
+| 0 | New env `goldeneai`, cloned from `ai4wy`, + pyarrow; run tests | login node, install only | awaiting approval |
+| 1 | Ingest CSV -> Parquet with exact-count check (`slurm/01_ingest.sh`) | 32 CPU, 256 GB, 6 h, no GPU | awaiting approval |
+| 2 | Schedule profile, calibration, burst features, GPS kinematics (`slurm/02_profile.sh`) | 64 CPU, 400 GB, 8 h, no GPU | awaiting approval |
+| 3 | Windows/tokens, handcrafted baseline + HMM, probes on old embeddings | CPU jobs | to be written after stage 2 results |
+| 4 | SimCLR training + sweeps/ablations | 1× H200 per run, ≤24 h with resume | to be written; separate approval |
+| 5 | Analysis suite M0–M8 | CPU (+1 GPU for UMAP if needed) | to be written |

@@ -106,7 +106,7 @@ All jobs: account ai4wy-eap, partition gp-1, outputs only under /project/ai4wy-e
 |---|---|---|---|
 | 0 | New env `aquilacl`, cloned from `ai4wy`, + pyarrow; run tests | login node, install only | awaiting approval |
 | 1 | Ingest CSV -> Parquet with exact-count check (`slurm/01_ingest.sh`) | 32 CPU, 256 GB, 6 h, no GPU | awaiting approval |
-| 2 | Schedule profile, calibration, burst features, GPS kinematics (`slurm/02_profile.sh`) | 64 CPU, 400 GB, 8 h, no GPU | awaiting approval |
+| 2 | Schedule profile, calibration, burst features, GPS kinematics (`slurm/02_profile.sh`) | 36 CPU, 300 GB, 8 h, no GPU | awaiting approval |
 | 3 | Windows/tokens, handcrafted baseline + HMM, probes on old embeddings | CPU jobs | to be written after stage 2 results |
 | 4 | SimCLR training + sweeps/ablations | 1× H200 per run, ≤24 h with resume | to be written; separate approval |
 | 5 | Analysis suite M0–M8 | CPU (+1 GPU for UMAP if needed) | to be written |

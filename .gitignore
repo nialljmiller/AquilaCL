@@ -1,0 +1,14 @@
+__pycache__/
+*.egg-info/
+.venv/
+# Never commit data, outputs or checkpoints: the tracks contain nest-area locations.
+data/
+runs/
+outputs/
+*.parquet
+*.csv
+*.npy
+*.npz
+*.pt
+*.log
+*.err

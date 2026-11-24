@@ -1,0 +1,25 @@
+[project]
+name = "goldeneai"
+version = "0.1.0"
+description = "Self-supervised representation learning of golden eagle movement and behaviour from GPS-accelerometer biologging data"
+authors = [{ name = "Niall Miller" }]
+requires-python = ">=3.11"
+dependencies = ["numpy", "pandas", "pyarrow", "scipy", "scikit-learn"]
+
+[project.optional-dependencies]
+train = ["torch>=2.4"]
+analysis = ["umap-learn", "matplotlib"]
+dev = ["pytest"]
+
+[project.scripts]
+goldeneai-ingest = "goldeneai.ingest:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

@@ -94,6 +94,29 @@ def hour_targets(windows: Path) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+HOUR_BEHAVIOUR = ("vedba", "speed", "climb", "turn", "frac_flapping", "frac_perched", "frac_circling",
+                  "frac_gliding", "frac_climbing_soar", "frac_night", "sun_elev")
+
+
+def hour_suite(df: pd.DataFrame, X: np.ndarray, mag_birds: set) -> dict:
+    """The hour-level probe suite used for both the first-draft and the new embeddings."""
+    df = df.copy()
+    first = df.groupby("bird")["hour"].transform("min")
+    df["cohort"] = np.where(first.dt.year <= 2024, "2024", "2025")
+    df["has_magnetometer"] = df["bird"].isin(list(mag_birds))
+    df["any_gps"] = df["gps_windows"] > 0
+    groups = df["bird"].to_numpy()
+    r = {}
+    c24 = (df["cohort"] == "2024").to_numpy()
+    r["has_magnetometer_within_2024"] = probe(X[c24], df.loc[c24, "has_magnetometer"].to_numpy(), groups[c24], "class")
+    r["decoding_version"] = probe(X, df["decoding"].astype(str).to_numpy(), groups, "class")
+    r["any_gps_in_hour"] = probe(X, df["any_gps"].to_numpy(), groups, "class")
+    for t in HOUR_BEHAVIOUR:
+        r[t] = probe(X, df[t].to_numpy(dtype=float), groups, "reg")
+    r["cohort (descriptive)"] = probe(X, df["cohort"].to_numpy(), groups, "class")
+    return r
+
+
 def old_embeddings(args) -> None:
     emb = pd.read_csv(args.embeddings)
     emb["hour"] = pd.to_datetime(emb["window_start"], utc=True).dt.tz_localize(None)
@@ -101,27 +124,10 @@ def old_embeddings(args) -> None:
     tgt = hour_targets(args.windows)
     df = emb.merge(tgt, on=["bird", "hour"], how="inner")
     mag_birds = {p.stem for p in (args.events / "magnetometer").glob("*.parquet")}
-    first = df.groupby("bird")["hour"].transform("min")
-    df["cohort"] = np.where(first.dt.year <= 2024, "2024", "2025")
-    df["has_magnetometer"] = df["bird"].isin(mag_birds)
-    df["any_gps"] = df["gps_windows"] > 0
-    groups = df["bird"].to_numpy()
     results = {"rows_matched": int(len(df)), "rows_embedding": int(len(emb)), "birds": int(df["bird"].nunique())}
     for space in ("z", "h"):
         X = df[[c for c in df if c.startswith(f"{space}_")]].to_numpy(dtype=float)
-        r = {}
-        # device / sampling nuisances (should be low)
-        c24 = (df["cohort"] == "2024").to_numpy()
-        r["has_magnetometer_within_2024"] = probe(X[c24], df.loc[c24, "has_magnetometer"].to_numpy(), groups[c24], "class")
-        r["decoding_version"] = probe(X, df["decoding"].astype(str).to_numpy(), groups, "class")
-        r["any_gps_in_hour"] = probe(X, df["any_gps"].to_numpy(), groups, "class")
-        # behaviour (should be high)
-        for t in ("vedba", "speed", "climb", "turn", "frac_flapping", "frac_perched", "frac_circling",
-                  "frac_gliding", "frac_climbing_soar", "frac_night", "sun_elev"):
-            r[t] = probe(X, df[t].to_numpy(dtype=float), groups, "reg")
-        # descriptive only
-        r["cohort (descriptive)"] = probe(X, df["cohort"].to_numpy(), groups, "class")
-        results[space] = r
+        results[space] = hour_suite(df, X, mag_birds)
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "probes_old_step30k.json").write_text(json.dumps(results, indent=1))
     print(json.dumps(results, indent=1))

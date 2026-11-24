@@ -3,7 +3,7 @@
 Reads ``<data>/events`` (from ``aquilacl.ingest``) and writes, under ``<data>/profile``:
 
     schedule.csv             per bird and UTC month: bursts by length, burst interval, GPS cadence, 1 Hz runs
-    calibration.csv          per bird/tag: fitted offset and gain, model, condition, posture spread, and the
+    calibration.csv          per bird/tag/sensitivity period: fitted offset and gain, model, condition, posture spread, and the
                              published tag-generation slope for comparison
     acc/<bird>.parquet       one row per acceleration burst: time, length, nearest GPS fix, sun elevation,
                              stillness flag and calibrated burst features
@@ -131,15 +131,21 @@ def profile_bird(events: Path, bird: str, out: Path, still_sd_counts: float, sti
         slow = (b["gps_dt_s"].abs() <= still_gps_s) & (b[gps.SPEED] < 0.5)
         b["still"] = (b["sd_max_counts"] < still_sd_counts) & ((b["sun_elev_deg"] < -6) | slow)
 
+        b["sensitivity_k"] = acc.sensitivity_regime(
+            b["timestamp"], b[["mean_x", "mean_y", "mean_z"]].to_numpy(), b["still"].to_numpy()
+        )
         feats = []
-        for tag, idx in b.groupby(TAG).groups.items():
+        for (tag, k), idx in b.groupby([TAG, "sensitivity_k"]).groups.items():
             sel = b.loc[idx]
             cal = acc.fit_calibration(sel[["mean_x", "mean_y", "mean_z"]].to_numpy(), still=sel["still"].to_numpy())
-            slope = published_slope(tag)
+            slope = published_slope(tag) / 2**k
             cal_rows.append(
                 {
                     "bird": bird,
                     "tag": tag,
+                    "sensitivity_k": int(k),
+                    "first": sel["timestamp"].min(),
+                    "last": sel["timestamp"].max(),
                     "bursts": len(sel),
                     "still_bursts": int(sel["still"].sum()),
                     "model": cal.model,
@@ -199,8 +205,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--still-sd-counts", type=float, default=8.0)
     ap.add_argument("--still-gps-s", type=float, default=120.0)
     ap.add_argument("--max-gap-s", type=float, default=3.0, help="largest gap inside a dense GPS run")
+    ap.add_argument("--out", type=Path, help="output directory (default <data>/profile)")
     args = ap.parse_args(argv)
-    events, out = args.data / "events", args.data / "profile"
+    events, out = args.data / "events", args.out or args.data / "profile"
     if out.exists() and any(out.iterdir()):
         raise SystemExit(f"{out} is not empty; use a new data directory or move it aside")
     birds = sorted({p.stem for s in ("gps", "acceleration") for p in (events / s).glob("*.parquet")})

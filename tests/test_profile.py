@@ -3,14 +3,26 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from aquilacl import gps, profile
+from aquilacl import acc, gps, profile
 
-GAIN, OFFSET = 1000.0, np.array([2040.0, 2055.0, 2035.0])
+GAIN, OFFSET = 512.0, np.array([2040.0, 2055.0, 2035.0])
 
 
 def _write(path, df):
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pandas(df, preserve_index=False), path)
+
+
+def test_sensitivity_switch_is_split(tmp_path):
+    """A tag reconfigured to double sensitivity for some days gets two calibrations."""
+    rng = np.random.default_rng(3)
+    t = pd.Series(pd.date_range("2025-05-01", periods=30 * 24, freq="h"))
+    k_true = ((t.dt.day >= 10) & (t.dt.day < 20)).astype(int).to_numpy()
+    g = np.c_[np.zeros(len(t)), np.zeros(len(t)), np.ones(len(t))]
+    means = g * (512.0 * 2**k_true)[:, None] + 2048 + rng.normal(0, 1, (len(t), 3))
+    still = rng.random(len(t)) < 0.5
+    k = acc.sensitivity_regime(t, means, still)
+    assert (k == k_true).mean() > 0.97
 
 
 def test_profile_bird_end_to_end(tmp_path):
@@ -50,6 +62,7 @@ def test_profile_bird_end_to_end(tmp_path):
 
     sched, cal = profile.profile_bird(ev, "B1", tmp_path / "profile", 8.0, 120.0, 3.0)
     c = cal[0]
+    assert len(cal) == 1 and c["sensitivity_k"] == 0
     assert c["still_bursts"] == 60  # all night bursts, no flight bursts
     assert abs(np.mean([c["gain_x"], c["gain_y"], c["gain_z"]]) / GAIN - 1) < 0.06
     out = pd.read_parquet(tmp_path / "profile" / "acc" / "B1.parquet")

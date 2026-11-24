@@ -109,6 +109,34 @@ def fit_calibration(
     return Calibration(o, g, model, len(m), spread, cond, resid)
 
 
+def sensitivity_regime(
+    t: "pd.Series",
+    mean_counts: np.ndarray,
+    still: np.ndarray,
+    base_counts_per_g: float = 512.0,
+    min_still_per_day: int = 5,
+) -> np.ndarray:
+    """Sensitivity setting per burst, as k in base * 2**k counts per g.
+
+    Some tags were reconfigured for weeks or months (here: about 1024 instead of
+    512 counts per g). A still burst must read 1 g, so the daily median length of
+    the still-burst mean vectors identifies the setting of each day. Days
+    without enough still bursts take the setting of the nearest earlier day
+    (or the next later one at the start of a track).
+    """
+    import pandas as pd
+
+    norm = np.linalg.norm(np.asarray(mean_counts, dtype=float) - RAW_CENTRE, axis=1)
+    day = pd.to_datetime(t).dt.floor("D")
+    df = pd.DataFrame({"day": day.to_numpy(), "norm": norm, "still": np.asarray(still, dtype=bool)})
+    daily = df[df["still"]].groupby("day")["norm"].agg(["median", "size"])
+    daily = daily[daily["size"] >= min_still_per_day]
+    k_day = np.round(np.log2(daily["median"] / base_counts_per_g)).astype(int)
+    days = pd.Series(k_day, index=daily.index).reindex(sorted(df["day"].unique()))
+    days = days.ffill().bfill().fillna(0).astype(int)
+    return days.reindex(df["day"]).to_numpy()
+
+
 def burst_stats(flat_bursts: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Per-burst sample count, mean counts (N, 3) and largest per-axis std (N,)."""
     n = np.empty(len(flat_bursts), dtype=np.int32)

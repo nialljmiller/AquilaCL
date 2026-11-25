@@ -16,9 +16,16 @@
    Once a run uses the common format, the two sensitivity swaps are identical by construction (score 1.0);
    for such runs the evidence is the full-window probe in (5).
 5. Nuisance probes next to the same probes on handcrafted features: sensitivity setting on full windows
-   (birds with both settings) and bird identity on held-out birds (later half of each record).
+   (birds with both settings) and bird identity on held-out birds (later half of each record). The feature
+   floor uses posture (pitch, roll) in the run's gravity-aligned frame (orientation.json, as in states.py);
+   the sensor-frame values, which carry the tag mounting angle, are kept under *_features_sensor_frame. Bird
+   identity is also given with 95 % intervals from a bootstrap over held-out birds (per-bird recall of the
+   single fit, birds resampled with replacement) and as the paired difference h - features.
 
 Usage: python -m aquilacl.evaluate --run <run dir> --windows <windows dir> --events <data>/events
+       [--only hour window cluster nuisance invariance]
+--only runs the named sections and writes evaluation_<section>.json for each (evaluation.json is untouched).
+The sections then draw from a fresh random generator, so sampled rows differ from those of a full run.
 """
 
 from __future__ import annotations
@@ -40,6 +47,8 @@ from . import dataset, probes
 WINDOW_BEHAVIOUR_REG = ["vedba", "speed_mean", "climb_mean", "turn_abs_mean", "flap_band_frac", "sun_elev_deg"]
 WINDOW_LABELS = ["label_flapping", "label_perched", "label_circling", "label_gliding", "label_climbing_soar", "label_night"]
 WINDOW_NUISANCE = ["sensitivity_k", "decoding", "short_acc"]
+SECTIONS = {"hour": "hour_level", "window": "window_level_holdout", "cluster": "cluster_stability_h",
+            "nuisance": "nuisance_vs_features", "invariance": "invariance"}  # --only name: result key
 
 
 def load_run(run: Path, windows: Path) -> tuple[pd.DataFrame, np.ndarray]:
@@ -222,25 +231,74 @@ def invariance_tests(run, windows, meta, H, hold, rng, dev, k=12, n=20000) -> di
     return out
 
 
-def _feature_matrix(meta):
+def _feature_matrix(meta, posture: np.ndarray | None = None):
+    """Handcrafted-feature floor; ``posture`` (N, 2) replaces the sensor-frame pitch_deg, roll_deg."""
     from .baseline import FEATURES
 
+    if posture is not None:
+        meta = meta.assign(pitch_deg=posture[:, 0], roll_deg=posture[:, 1])
     X = meta[[c for c in FEATURES if c in meta]].to_numpy(float)
     miss = ~np.isfinite(X)
     X = np.where(miss, np.nanmedian(X, axis=0), X)
     return np.c_[X, ~np.isfinite(meta["speed_mean"].to_numpy(float)) if "speed_mean" in meta else miss.any(1)]  # + "no GPS"
 
 
-def nuisance_vs_features(meta, H, hold, rng, per_class=1500) -> dict:
+def rotated_posture_rows(run: Path, windows: Path, meta: pd.DataFrame, rows: np.ndarray) -> np.ndarray | None:
+    """(N, 2) pitch, roll in the run's gravity-aligned frame for ``rows`` of ``meta`` (NaN elsewhere).
+
+    Uses states.rotated_posture with the rotations in <run>/orientation.json on the sensor-frame acc.npy of
+    each bird; ``meta`` must hold each bird's windows contiguously and in file order (as load_run returns them).
+    None if the run has no orientation.json.
+    """
+    path = run / "orientation.json"
+    if not path.exists():
+        return None
+    from .states import rotated_posture
+
+    R = {o["bird"]: np.asarray(o["R"], np.float32).reshape(3, 3) for o in json.loads(path.read_text())}
+    birds = meta["bird"].to_numpy()
+    within = meta.groupby("bird", sort=False).cumcount().to_numpy()
+    rows = np.unique(rows)
+    out = np.full((len(meta), 2), np.nan)
+    for b in pd.unique(birds[rows]):
+        if b not in R:
+            raise ValueError(f"no rotation in {path} for {b}")
+        r = rows[birds[rows] == b]
+        acc = np.load(windows / str(b) / "acc.npy", mmap_mode="r")
+        am = np.load(windows / str(b) / "acc_mask.npy", mmap_mode="r")
+        out[r] = rotated_posture(acc[within[r]], am[within[r]], R[b])
+    return out
+
+
+def bootstrap_mean_ci(values: np.ndarray, n_boot: int = 200, seed: int = 0) -> np.ndarray:
+    """95 % percentile intervals of the mean over the last axis, resampling its entries with replacement.
+
+    ``values`` (n,) or (sets, n), e.g. per-bird recall (whose mean is the balanced accuracy). Every row uses the
+    same resamples, so a row holding a difference of two others gives the paired interval. Returns (sets, 2).
+    """
+    v = np.atleast_2d(np.asarray(values, float))
+    idx = np.random.default_rng(seed).integers(0, v.shape[1], (n_boot, v.shape[1]))
+    return np.percentile(v[:, idx].mean(-1), [2.5, 97.5], axis=1).T
+
+
+def per_class_recall(y: np.ndarray, pred: np.ndarray, classes) -> np.ndarray:
+    return np.array([float((pred[y == c] == c).mean()) for c in classes])
+
+
+def nuisance_vs_features(meta, H, hold, rng, per_class=1500, posture_fn=None, n_boot=200, boot_seed=0) -> dict:
     """Nuisance probes on h next to the same probes on handcrafted features (the level behaviour alone explains).
 
     sensitivity_full_windows: full windows of birds that use both settings, grouped by bird. bird_id_holdout: held-out birds, fit on the first half of each bird's time span, test on
     the second half. A value on h well above the feature value means the representation carries the nuisance
     beyond behaviour.
+
+    ``posture_fn(rows)`` returns gravity-aligned (pitch, roll) for those rows (see rotated_posture_rows) or
+    None; when given, the feature floor uses it and the sensor-frame floor is reported as *_sensor_frame. The
+    bird-identity bootstrap resamples held-out birds (``n_boot`` times, own generator ``boot_seed``, so ``rng``
+    is drawn from exactly as before).
     """
     from sklearn.model_selection import GroupKFold
 
-    feats = _feature_matrix(meta)
     out = {}
     # sensitivity setting: full windows only (the setting follows burst type, which also sets window fullness),
     # birds that use both settings, grouped cross-validation by bird
@@ -255,18 +313,8 @@ def nuisance_vs_features(meta, H, hold, rng, per_class=1500) -> dict:
             r = ii[kk == c]
             rows.append(rng.choice(r, min(per_class, len(r)), replace=False))
     n_birds = len({meta["bird"].iat[r[0]] for r in rows})
-    if n_birds >= 2:
-        r = np.concatenate(rows)
-        y = meta["sensitivity_k"].to_numpy()[r]
-        g = meta["bird"].to_numpy()[r]
-        for name, X in (("h", H[r]), ("features", feats[r])):
-            pred = np.empty(len(r), dtype=y.dtype)
-            for tr, te in GroupKFold(min(5, n_birds)).split(X, y, g):
-                mdl = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000, class_weight="balanced")).fit(X[tr], y[tr])
-                pred[te] = mdl.predict(X[te])
-            out[f"sensitivity_full_windows_{name}"] = float(balanced_accuracy_score(y, pred))
-    out["sensitivity_full_windows_birds"] = int(n_birds)
-    # bird identity among held-out birds, later half of each bird's record
+    sens_rows = np.concatenate(rows) if n_birds >= 2 else np.array([], int)
+    # bird identity among held-out birds, later half of each bird's record (rows drawn before any fit, as before)
     tr, te = [], []
     for b in hold:
         idx = np.flatnonzero(meta["bird"].to_numpy() == b)
@@ -277,10 +325,45 @@ def nuisance_vs_features(meta, H, hold, rng, per_class=1500) -> dict:
         tr.append(rng.choice(idx[:half], min(2000, half), replace=False))
         te.append(rng.choice(idx[half:], min(2000, len(idx) - half), replace=False))
     tr, te = np.concatenate(tr), np.concatenate(te)
+
+    feats_sensor = _feature_matrix(meta)
+    posture = posture_fn(np.concatenate([sens_rows, tr, te])) if posture_fn is not None else None
+    sets = [("h", H), ("features", feats_sensor if posture is None else _feature_matrix(meta, posture))]
+    if posture is not None:
+        sets.append(("features_sensor_frame", feats_sensor))
+    out["features_posture_frame"] = "sensor" if posture is None else "gravity_aligned"
+
+    if n_birds >= 2:
+        r = sens_rows
+        y = meta["sensitivity_k"].to_numpy()[r]
+        g = meta["bird"].to_numpy()[r]
+        for name, F in sets:
+            X = F[r]
+            pred = np.empty(len(r), dtype=y.dtype)
+            for ftr, fte in GroupKFold(min(5, n_birds)).split(X, y, g):
+                mdl = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000, class_weight="balanced")).fit(X[ftr], y[ftr])
+                pred[fte] = mdl.predict(X[fte])
+            out[f"sensitivity_full_windows_{name}"] = float(balanced_accuracy_score(y, pred))
+    out["sensitivity_full_windows_birds"] = int(n_birds)
+
     y = meta["bird"].to_numpy()
-    for name, X in (("h", H), ("features", feats)):
+    classes = sorted(np.unique(y[te]))
+    recall = {}
+    for name, X in sets:
         mdl = make_pipeline(StandardScaler(), LogisticRegression(max_iter=3000, class_weight="balanced")).fit(X[tr], y[tr])
-        out[f"bird_id_holdout_{name}"] = float(balanced_accuracy_score(y[te], mdl.predict(X[te])))
+        pred = mdl.predict(X[te])
+        out[f"bird_id_holdout_{name}"] = float(balanced_accuracy_score(y[te], pred))
+        recall[name] = per_class_recall(y[te], pred, classes)
+        out[f"bird_id_holdout_{name}_recall_by_bird"] = {str(c): round(float(v), 4) for c, v in zip(classes, recall[name])}
+    names = [n for n, _ in sets]
+    diffs = [f"h_minus_{n}" for n in names if n != "h"]
+    rows_ = [recall[n] for n in names] + [recall["h"] - recall[d[len("h_minus_"):]] for d in diffs]
+    ci = bootstrap_mean_ci(np.stack(rows_), n_boot, boot_seed)
+    for name, c in zip(names + diffs, ci):
+        out[f"bird_id_holdout_{name}_ci95"] = [float(c[0]), float(c[1])]
+    for d in diffs:
+        out[f"bird_id_holdout_{d}"] = float(out["bird_id_holdout_h"] - out[f"bird_id_holdout_{d[len('h_minus_'):]}"])
+    out["bird_id_bootstrap"] = {"resamples": int(n_boot), "birds": int(len(classes)), "unit": "held-out bird"}
     out["bird_id_chance"] = 1 / len(np.unique(y[tr]))
     return out
 
@@ -292,31 +375,42 @@ def main(argv=None):
     ap.add_argument("--events", type=Path, required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--only", nargs="+", choices=list(SECTIONS), default=None,
+                    help="run only these sections; each writes evaluation_<section>.json instead of evaluation.json")
     args = ap.parse_args(argv)
     rng = np.random.default_rng(args.seed)
     meta, H = load_run(args.run, args.windows)
     hold = json.loads((args.run / "holdout.json").read_text())
+    todo = list(SECTIONS) if args.only is None else [s for s in SECTIONS if s in args.only]
 
-    # 1. hour level, same suite as the first-draft model
-    meta["hour"] = meta["t_start"].dt.floor("h")
-    hcols = [f"h_{i}" for i in range(H.shape[1])]
-    hdf = pd.DataFrame(H, columns=hcols)
-    hdf["bird"], hdf["hour"] = meta["bird"].to_numpy(), meta["hour"].to_numpy()
-    hour_h = hdf.groupby(["bird", "hour"])[hcols].mean().reset_index()
-    tgt = probes.hour_targets(args.windows)
-    df = hour_h.merge(tgt, on=["bird", "hour"], how="inner")
-    mag = {p.stem for p in (args.events / "magnetometer").glob("*.parquet")}
-    res = {"hour_level": probes.hour_suite(df, df[hcols].to_numpy(float), mag), "hours": int(len(df))}
-    # 2. window level on held-out birds
-    res["window_level_holdout"] = holdout_window_probes(meta, H, hold, rng)
-    res["holdout_birds"] = hold
-    # 3. cluster stability
-    res["cluster_stability_h"] = cluster_stability(meta, H, rng)
-    # 4. nuisance probes against the handcrafted-feature level
-    res["nuisance_vs_features"] = nuisance_vs_features(meta, H, hold, rng)
-    # 5. invariance to recording format
-    res["invariance"] = invariance_tests(args.run, args.windows, meta, H, hold, rng, args.device)
-    (args.run / "evaluation.json").write_text(json.dumps(res, indent=1))
+    res = {}
+    for sec in todo:
+        part = {}
+        if sec == "hour":  # 1. hour level, same suite as the first-draft model
+            meta["hour"] = meta["t_start"].dt.floor("h")
+            hcols = [f"h_{i}" for i in range(H.shape[1])]
+            hdf = pd.DataFrame(H, columns=hcols)
+            hdf["bird"], hdf["hour"] = meta["bird"].to_numpy(), meta["hour"].to_numpy()
+            hour_h = hdf.groupby(["bird", "hour"])[hcols].mean().reset_index()
+            tgt = probes.hour_targets(args.windows)
+            df = hour_h.merge(tgt, on=["bird", "hour"], how="inner")
+            mag = {p.stem for p in (args.events / "magnetometer").glob("*.parquet")}
+            part = {"hour_level": probes.hour_suite(df, df[hcols].to_numpy(float), mag), "hours": int(len(df))}
+        elif sec == "window":  # 2. window level on held-out birds
+            part = {"window_level_holdout": holdout_window_probes(meta, H, hold, rng), "holdout_birds": hold}
+        elif sec == "cluster":  # 3. cluster stability
+            part = {"cluster_stability_h": cluster_stability(meta, H, rng)}
+        elif sec == "nuisance":  # 4. nuisance probes against the handcrafted-feature level
+            part = {"nuisance_vs_features": nuisance_vs_features(
+                meta, H, hold, rng, posture_fn=lambda rows: rotated_posture_rows(args.run, args.windows, meta, rows))}
+        elif sec == "invariance":  # 5. invariance to recording format
+            part = {"invariance": invariance_tests(args.run, args.windows, meta, H, hold, rng, args.device)}
+        if args.only is not None:
+            part.setdefault("holdout_birds", hold)
+            (args.run / f"evaluation_{sec}.json").write_text(json.dumps(part, indent=1))
+        res.update(part)
+    if args.only is None:
+        (args.run / "evaluation.json").write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
 
 

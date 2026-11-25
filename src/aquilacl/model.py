@@ -101,3 +101,30 @@ def nt_xent(z0: torch.Tensor, z1: torch.Tensor, tau: float, extra_mask: torch.Te
         sim = sim.masked_fill(m.repeat(2, 2), float("-inf"))
     target = torch.cat([torch.arange(B, 2 * B), torch.arange(0, B)]).to(z.device)
     return F.cross_entropy(sim, target)
+
+
+class _GradReverse(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, coeff):
+        ctx.coeff = coeff
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, g):
+        return -ctx.coeff * g, None
+
+
+def grad_reverse(x: torch.Tensor, coeff: float = 1.0) -> torch.Tensor:
+    """Identity in the forward pass; multiplies the gradient by -coeff in the backward pass (DANN)."""
+    return _GradReverse.apply(x, coeff)
+
+
+class BirdHead(nn.Module):
+    """Adversary: MLP on h predicting which training bird a window comes from."""
+
+    def __init__(self, h_dim: int, n_birds: int, hidden: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(h_dim, hidden), nn.GELU(), nn.Linear(hidden, n_birds))
+
+    def forward(self, h):
+        return self.net(h)

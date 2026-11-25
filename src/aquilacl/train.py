@@ -6,6 +6,11 @@ Usage:
 The run directory receives config.json, holdout.json, orientation.csv, loss.csv (appended, never truncated),
 checkpoints, and embeddings/<bird>.npz (h and z for every window, in window order). Re-running with the same
 --run resumes from the latest checkpoint.
+
+Identity-reduction options (all off by default; r4 and earlier runs are unchanged): --bird-adv W adds a
+gradient-reversed bird classifier on h (DANN; loss = nt_xent + W * CE, reversal coefficient ramped over
+--bird-adv-warmup steps; adversary loss/accuracy in adv.csv); --axis-scale, --offset-g and --yaw-deg add per-axis
+gain, per-axis offset and rotation about gravity to the augmentation.
 """
 
 from __future__ import annotations
@@ -21,7 +26,7 @@ import pandas as pd
 import torch
 
 from . import dataset
-from .model import Encoder, nt_xent
+from .model import BirdHead, Encoder, grad_reverse, nt_xent
 from .windows import GPS_CHANNELS
 
 
@@ -35,6 +40,15 @@ def random_rotation(n: int, max_deg: float, device) -> torch.Tensor:
     eye = torch.eye(3, device=device).expand(n, 3, 3)
     s, c = torch.sin(ang)[:, None, None], torch.cos(ang)[:, None, None]
     return eye + s * K + (1 - c) * K @ K
+
+
+def yaw_rotation(n: int, max_deg: float, device) -> torch.Tensor:
+    """(n, 3, 3) rotations about +z by angles uniform in +-max_deg (mounting yaw, which roost alignment keeps)."""
+    ang = torch.deg2rad(torch.empty(n, device=device).uniform_(-max_deg, max_deg))
+    c, s = torch.cos(ang), torch.sin(ang)
+    R = torch.zeros(n, 3, 3, device=device)
+    R[:, 0, 0], R[:, 0, 1], R[:, 1, 0], R[:, 1, 1], R[:, 2, 2] = c, -s, s, c, 1.0
+    return R
 
 
 def contiguous_crop(mask: torch.Tensor, min_len: int, p: float) -> torch.Tensor:
@@ -81,7 +95,20 @@ def augment(acc, amask, gps, gmask, cfg, short_lengths: torch.Tensor) -> tuple:
     acc, amask = burst_crop(acc, amask, short_lengths, cfg.p_burst_crop)
     R = random_rotation(B, cfg.rot_deg, dev)
     scale = torch.empty(B, 1, 1, device=dev).uniform_(1 - cfg.scale, 1 + cfg.scale)
-    acc = (acc.float() @ R.transpose(1, 2)) * scale + cfg.noise_g * torch.randn_like(acc, dtype=torch.float32)
+    # optional extras (off = no random numbers drawn, so runs without them are unchanged)
+    yaw_deg, axis_scale, offset_g = getattr(cfg, "yaw_deg", 0.0), getattr(cfg, "axis_scale", 0.0), getattr(cfg, "offset_g", 0.0)
+    Rz = yaw_rotation(B, yaw_deg, dev) if yaw_deg > 0 else None
+    gain = torch.empty(B, 1, 3, device=dev).uniform_(1 - axis_scale, 1 + axis_scale) if axis_scale > 0 else None
+    offset = torch.empty(B, 1, 3, device=dev).uniform_(-offset_g, offset_g) if offset_g > 0 else None
+    a = acc.float()
+    if Rz is not None:
+        a = a @ Rz.transpose(1, 2)  # yaw about gravity (+z) first, in the roost-aligned frame
+    a = (a @ R.transpose(1, 2)) * scale
+    if gain is not None:
+        a = a * gain
+    if offset is not None:
+        a = a + offset
+    acc = a + cfg.noise_g * torch.randn_like(acc, dtype=torch.float32)
     acc = acc * amask[..., None]
     # GPS: drop seconds, then optionally keep a contiguous span
     sec = gmask.any(-1)
@@ -122,7 +149,7 @@ class BirdBatchSampler:
 
 
 # --------------------------------------------------------------------------- main
-def get_args(argv=None):
+def parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--windows", type=Path, required=True)
     ap.add_argument("--run", type=Path, required=True)
@@ -154,7 +181,30 @@ def get_args(argv=None):
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--embed-only", action="store_true", help="skip training; embed with the latest checkpoint")
-    return ap.parse_args(argv)
+    # identity-reduction options, all off by default
+    ap.add_argument("--axis-scale", type=float, default=0.0, help="per-axis gain jitter uniform in 1 +- x (on top of --scale)")
+    ap.add_argument("--offset-g", type=float, default=0.0, help="per-axis constant offset uniform in +- x g per view")
+    ap.add_argument("--yaw-deg", type=float, default=0.0, help="extra rotation about +z (gravity) uniform in +- x degrees")
+    ap.add_argument("--bird-adv", type=float, default=0.0,
+                    help="weight of a gradient-reversed bird classifier on h (0 = off)")
+    ap.add_argument("--bird-adv-warmup", type=int, default=10000,
+                    help="steps over which the reversal coefficient ramps 0 -> 1 as 2/(1+exp(-10p))-1")
+    ap.add_argument("--bird-adv-hidden", type=int, default=128)
+    ap.add_argument("--bird-adv-mode", choices=["confusion", "reverse"], default="confusion",
+                    help="confusion: head trained on detached h, encoder pushes the head's output towards uniform "
+                         "(bounded, stable); reverse: gradient reversal of the head's cross-entropy (DANN; diverged "
+                         "in tests, the encoder makes the head confidently wrong and h grows)")
+    return ap
+
+
+def get_args(argv=None):
+    return parser().parse_args(argv)
+
+
+def adv_coeff(step: int, warmup: int) -> float:
+    """DANN reversal schedule: 2 / (1 + exp(-10 p)) - 1 with p = step / warmup, capped at 1."""
+    p = min(step / warmup, 1.0) if warmup > 0 else 1.0
+    return 2.0 / (1.0 + math.exp(-10.0 * p)) - 1.0
 
 
 def lr_at(step, cfg):
@@ -213,7 +263,10 @@ def record_config(cfg) -> None:
     path = cfg.run / "config.json"
     if path.exists() and any(cfg.run.glob("ckpt_*.pt")):
         old = json.loads(path.read_text())
-        diff = {k: (old.get(k), v) for k, v in cur.items() if k not in RUN_CONTROL and str(old.get(k)) != str(v)}
+        ap = parser()
+        # a key missing from an older config.json (option added later) matches when the given value is its default
+        diff = {k: (old.get(k), v) for k, v in cur.items() if k not in RUN_CONTROL
+                and not (k not in old and str(v) == str(ap.get_default(k))) and str(old.get(k)) != str(v)}
         if diff:
             raise SystemExit(f"{cfg.run} was trained with other settings (stored, given): {diff}")
         return
@@ -259,12 +312,19 @@ def main(argv=None):
     sampler = BirdBatchSampler(bird_code, w, cfg.batch, cfg.birds_per_batch, cfg.seed)
 
     model = Encoder(len(GPS_CHANNELS)).to(dev)
-    opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    params = list(model.parameters())
+    head = None
+    if cfg.bird_adv > 0:  # adversary over the training birds only (held-out birds never enter)
+        head = BirdHead(model.fuse[-1].out_features, int(bird_code.max()) + 1, cfg.bird_adv_hidden).to(dev)
+        params += list(head.parameters())
+    opt = torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
     step = 0
     ckpts = sorted(cfg.run.glob("ckpt_*.pt"))
     if ckpts:
         ck = torch.load(ckpts[-1], map_location=dev)
         model.load_state_dict(ck["model"])
+        if head is not None:
+            head.load_state_dict(ck["bird_head"])
         opt.load_state_dict(ck["opt"])
         step = ck["step"]
         sampler.rng = np.random.default_rng(cfg.seed + step)
@@ -275,6 +335,11 @@ def main(argv=None):
     log = open(cfg.run / "loss.csv", "a")
     if log.tell() == 0:
         log.write("step,loss,lr,pos_cos,neg_cos,sec\n")
+    adv_log = None
+    if head is not None:
+        adv_log = open(cfg.run / "adv.csv", "a")
+        if adv_log.tell() == 0:
+            adv_log.write("step,adv_loss,adv_acc,coeff\n")
     t0 = time.time()
     while step < cfg.steps and not cfg.embed_only:
         i = torch.from_numpy(sampler()).to(dev)
@@ -285,13 +350,31 @@ def main(argv=None):
         for gp in opt.param_groups:
             gp["lr"] = lr_at(step, cfg)
         with torch.autocast(dev.split(":")[0], dtype=torch.bfloat16, enabled=dev.startswith("cuda")):
-            _, z0 = model(*v0)
-            _, z1 = model(*v1)
+            h0, z0 = model(*v0)
+            h1, z1 = model(*v1)
         with torch.autocast(dev.split(":")[0], enabled=False):
             loss = nt_xent(z0.float(), z1.float(), cfg.tau, same)
+            con_loss = loss  # loss.csv keeps the contrastive term alone, comparable with runs without adversary
+            if head is not None:
+                coeff = adv_coeff(step, cfg.bird_adv_warmup)
+                hb = torch.cat([h0, h1]).float()
+                yb = bcode_t[i].repeat(2)
+                if cfg.bird_adv_mode == "reverse":
+                    logits = head(grad_reverse(hb, coeff))
+                    adv_loss = torch.nn.functional.cross_entropy(logits, yb)
+                    loss = loss + cfg.bird_adv * adv_loss
+                else:  # confusion: the head learns on detached h; the encoder pushes a frozen copy towards uniform
+                    logits = head(hb.detach())
+                    adv_loss = torch.nn.functional.cross_entropy(logits, yb)
+                    frozen = {k: v.detach() for k, v in head.named_parameters()}
+                    logp = torch.func.functional_call(head, frozen, (hb,)).log_softmax(1)
+                    conf_loss = -logp.mean(1).mean()  # cross-entropy to the uniform distribution, minimum log(n_birds)
+                    loss = loss + adv_loss + cfg.bird_adv * coeff * conf_loss
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        if head is not None:
+            torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
         opt.step()
         step += 1
         if step % 100 == 0:
@@ -300,12 +383,21 @@ def main(argv=None):
                 zn1 = torch.nn.functional.normalize(z1.float(), dim=1)
                 pos = (zn0 * zn1).sum(1).mean().item()
                 neg = (zn0 @ zn1.T).mean().item()
-            log.write(f"{step},{loss.item():.5f},{lr_at(step, cfg):.3e},{pos:.4f},{neg:.4f},{time.time() - t0:.1f}\n")
+            log.write(f"{step},{con_loss.item():.5f},{lr_at(step, cfg):.3e},{pos:.4f},{neg:.4f},{time.time() - t0:.1f}\n")
             log.flush()
+            if adv_log is not None:
+                acc_adv = (logits.argmax(1) == yb).float().mean().item()
+                adv_log.write(f"{step},{adv_loss.item():.5f},{acc_adv:.4f},{coeff:.4f}\n")
+                adv_log.flush()
         if step % cfg.save_every == 0 or step == cfg.steps:
-            torch.save({"step": step, "model": model.state_dict(), "opt": opt.state_dict()}, cfg.run / f"ckpt_{step:07d}.pt")
+            ck = {"step": step, "model": model.state_dict(), "opt": opt.state_dict()}
+            if head is not None:
+                ck["bird_head"] = head.state_dict()
+            torch.save(ck, cfg.run / f"ckpt_{step:07d}.pt")
             print(f"step {step} loss {loss.item():.4f} ({time.time() - t0:.0f} s)", flush=True)
     log.close()
+    if adv_log is not None:
+        adv_log.close()
     del A, AM, G, GM
     embed(model, data, dev, cfg.run / "embeddings")
     print("embeddings written")

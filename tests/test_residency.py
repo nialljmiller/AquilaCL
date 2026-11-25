@@ -11,7 +11,7 @@ LAT0, LON0 = 44.4371, -108.2913  # planted, distinctive; must never appear in an
 DEG_KM = rs.KM_PER_DEG
 
 
-def _path(kind: str, days: int, rng, start="2024-10-15"):
+def _path(kind: str, days: int, rng, start="2024-10-15", offset_north=0.0):
     """Daily (lat, lon) offsets in km north/east for a planted strategy, plus dates."""
     t = np.arange(days, dtype=float)
     north = np.zeros(days)
@@ -24,6 +24,12 @@ def _path(kind: str, days: int, rng, start="2024-10-15"):
         east = 500 * rs._sig(t, 150, 4)
     elif kind == "nomad":  # 400 km excursion east for 90 days, then back
         east = 400 * (rs._sig(t, 120, 4) - rs._sig(t, 210, 4))
+    elif kind == "late_leaver":  # leaves 400 km east 100 days before the track ends
+        east = 400 * rs._sig(t, days - 100, 4)
+    elif kind == "passage_migrant":  # deployed on passage; winters 350 km east of it, summers 1500 km north
+        doy = dates.dayofyear.to_numpy()
+        east = 350 * rs._sig(t, 40, 3)
+        north = 1500 * (rs._sig(doy, 95, 3) - rs._sig(doy, 275, 3)) * rs._sig(t, 40, 3)
     north = north + rng.normal(0, 5, days)
     east = east + rng.normal(0, 5, days)
     return dates, north, east
@@ -62,18 +68,24 @@ def test_nsd_fit_recovers_model(model, p):
         assert abs(q[1] - 160) < 5 and abs(q[1] + q[3] - 340) < 5
 
 
-@pytest.mark.parametrize("kind, days, rule, nsd", [
-    ("resident", 500, "resident", "resident"),
-    ("migrant", 760, "migrant", "migrant"),  # two years: NSD fit on the first cycle only
-    ("disperser", 600, "disperser", "disperser"),
-    ("nomad", 500, "nomad", None),  # Bunnefeld has no 'return from a short excursion' class: not checked
-    ("resident", 90, "insufficient", "insufficient"),
-    ("resident", 130, "undetermined", "undetermined"),  # Oct-Feb only: no spring coverage
+@pytest.mark.parametrize("kind, days, young, rule, nsd", [
+    ("resident", 500, False, "resident_full", "resident"),
+    ("migrant", 760, False, "migrant", "migrant"),  # two years: NSD fit on the first cycle only
+    ("disperser", 600, False, "disperser", "disperser"),
+    ("nomad", 500, False, "nomad", None),  # Bunnefeld has no 'return from a short excursion' class: not checked
+    ("resident", 90, False, "insufficient", "insufficient"),
+    ("resident", 130, False, "resident_partial", "resident"),  # Oct-Feb only: no spring coverage needed any more
+    ("late_leaver", 500, False, "away_at_end", None),
+    ("disperser", 600, True, "juvenile_dispersal", "disperser"),
+    ("nomad", 500, True, "juvenile_dispersal", None),
+    ("resident", 400, True, "resident_full", "resident"),
+    # regression: the old rule needed the return to reach the deployment centroid and called this a disperser
+    ("passage_migrant", 760, False, "migrant", None),
 ])
-def test_classify_planted_tracks(kind, days, rule, nsd):
+def test_classify_planted_tracks(kind, days, young, rule, nsd):
     dates, n, e = _path(kind, days, np.random.default_rng(1))
     tr = _track_from(dates, n, e)
-    c = rs.classify_bird(tr, 120)
+    c = rs.classify_bird(tr, 120, young)
     assert c["rule_class"] == rule
     if nsd:
         assert c["nsd_class"] == nsd
@@ -85,10 +97,58 @@ def test_classify_planted_tracks(kind, days, rule, nsd):
         assert c["max_north_deploy_km"] > 1400
 
 
-def test_far_without_return_is_undetermined():
+def test_far_without_return_is_migrant_departed():
     dates, n, e = _path("migrant", 250, np.random.default_rng(2))  # ends in June, north
     c = rs.classify_bird(_track_from(dates, n, e), 120)
-    assert c["rule_class"] == "undetermined" and c["nsd_class"] == "undetermined"
+    assert c["rule_class"] == "migrant_departed" and c["nsd_class"] == "undetermined"
+    assert rs.coarse(c["rule_class"]) == "migrant" and rs.coarse("away_at_end") == "other"
+
+
+def test_window_days_match_daily_positions():
+    """Guard (no key bug was found in the first run): raw GPS timestamps are tz-naive datetime64[ms] UTC and
+    window t_start is datetime64[ns]; both map to the same UTC day, and the +-2-day fill is the nearest position."""
+    gps_ts = pd.Series(pd.to_datetime(["2024-12-01 23:50", "2024-12-02 00:10", "2024-12-08 12:00"])).astype(
+        "datetime64[ms]")
+    g = pd.DataFrame({"timestamp": gps_ts, "location-lat": [LAT0, LAT0 + 5, LAT0], "location-long": LON0})
+    tr = rs.track(rs.daily_positions(rs.clean_fixes(g)), (LAT0, LON0))
+    assert tr.dc_km.round().tolist() == [0, round(5 * DEG_KM), 0]
+    days = rs.area_days(tr.epoch_day.to_numpy(), tr.dc_km.to_numpy())
+    e0 = int(tr.epoch_day.iat[0])
+    # offsets from Dec 1: Dec 1 (0) in; Dec 2 (1) out, its own position; Dec 3-4 nearest Dec 2 (out); Dec 5 (4) is
+    # 3 days from both positions, not filled; Dec 6-7 (5, 6) nearest Dec 8 (in); Dec 8 (7) in; Dec 9-10 and
+    # Nov 29-30 filled
+    assert sorted(days - e0) == [-2, -1, 0, 5, 6, 7, 8, 9]
+    t_start = pd.Series(pd.to_datetime(["2024-12-01 00:30", "2024-12-02 00:30", "2024-12-06 23:59",
+                                        "2024-12-05 12:00"])).astype("datetime64[ns]")
+    m = rs.window_selection(t_start, {"w": (days, rs.COMPARE_MONTHS), "summer": (days, (6, 7, 8))})
+    assert m["w"].tolist() == [True, False, True, False] and not m["summer"].any()
+    tz = rs.window_selection(t_start.dt.tz_localize("UTC"), {"w": (days, rs.COMPARE_MONTHS)})
+    assert tz["w"].tolist() == m["w"].tolist()
+
+
+def test_cohort_strata():
+    y = np.array([1, 1, 1, 1, 0, 0, 0, 0, 0, 0])
+    coh = np.array([0, 0, 1, 1, 1, 1, 2, 2, 2, 2])  # cohort 0 all migrants, cohort 2 all residents
+    assert rs.informative_strata(y, coh) == (1, 4) and rs.informative_strata(y, None) == (1, 10)
+    lab = pd.Series(y, index=[f"b{i}" for i in range(10)])
+    V = pd.DataFrame({"v": np.r_[np.full(4, 1.0), np.zeros(6)]}, index=lab.index)
+    r = rs.compare_table(V, lab, pd.Series("f", index=lab.index), "f", "g", 99, np.random.default_rng(0), True,
+                         pd.Series(coh.astype(str), index=lab.index))[0]
+    # only cohort 1 holds both groups: 2 migrants, 2 residents there, so the test is not run although 4 migrants exist
+    assert r["n_migrant_all_cohorts"] == 4 and r["n_migrant"] == 2 and r["n_resident"] == 2
+    assert r["informative_strata"] == 1 and r["test"].startswith("not tested")
+    y2 = np.r_[np.ones(6), np.zeros(6), np.ones(2), np.zeros(4)].astype(int)
+    coh2 = np.r_[np.zeros(12), np.ones(6)].astype(int).astype(str)
+    lab2 = pd.Series(y2, index=[f"c{i}" for i in range(18)])
+    v2 = np.where(y2 == 1, 1.0, 0.0) + np.r_[np.zeros(12), np.full(6, 5.0)]  # cohort 1 sits 5 higher
+    r2 = rs.compare_table(pd.DataFrame({"v": v2}, index=lab2.index), lab2, pd.Series("f", index=lab2.index), "f",
+                          "g", 199, np.random.default_rng(0), True, pd.Series(coh2, index=lab2.index))[0]
+    # unequal group shares per cohort: a pooled mean difference would mix in the cohort level (0.25 here); the
+    # within-cohort statistic recovers the planted difference of 1
+    assert r2["informative_strata"] == 2 and "within cohort" in r2["test"] and r2["p_perm"] < 0.05
+    assert r2["diff_mean"] == pytest.approx(1.0)
+    d, p = rs.perm_strat_diff(v2, y2, np.zeros(18, int), 99, np.random.default_rng(0))
+    assert d == pytest.approx(v2[y2 == 1].mean() - v2[y2 == 0].mean())
 
 
 def test_holm():
@@ -162,30 +222,38 @@ def test_end_to_end_cli(tmp_path, monkeypatch):
             "--workers", "1"]
     rs.main(args)
     for f in ["residency.csv", "agreement.csv", "residency_summary.md", "nsd_birds.png", "nsd_by_strategy.png",
-              "behaviour_tests.csv", "behaviour_birds.csv", "classifiers.csv", "nested.csv", "metadata.json"]:
+              "behaviour_groups.csv", "behaviour_tests.csv", "behaviour_birds.csv", "classifiers.csv", "nested.csv", "metadata.json"]:
         assert (out / f).exists(), f
     R = pd.read_csv(out / "residency.csv").set_index("bird")
     assert (R.loc[[f"B{i:02d}" for i in range(6)], "strategy"] == "migrant").all()
-    assert (R.loc[[f"B{i:02d}" for i in range(6, 12)], "strategy"] == "resident").all()
-    assert (R.loc[["B12", "B13"], "strategy"] == "disperser").all() and R.loc[["B12", "B13"], "young"].all()
+    assert (R.loc[[f"B{i:02d}" for i in range(6, 12)], "strategy"] == "resident_full").all()
+    assert (R.loc[["B12", "B13"], "strategy"] == "juvenile_dispersal").all() and R.loc[["B12", "B13"], "young"].all()
+    assert (R.loc[[f"B{i:02d}" for i in range(6)], "winter_basin_share"] > 0.98).all()
+    G = pd.read_csv(out / "behaviour_groups.csv").set_index("grouping")
+    assert set(G.index) == {f"{v}|{m}|{a}" for v in rs.VARIANTS for m in ("rule", "consensus") for a in ("adult", "all")}
+    g = G.loc["c2024_novmar_basin|rule|adult"]
+    assert g.migrants == 6 and g.residents == 6 and g.migrants_with_windows == 6 and g.residents_with_windows == 6
+    assert g.migrants_median_days > 30 and "Dec" in g.migrants_month_mix and "Jul" not in g.migrants_month_mix
     assert R["migrant_flag"].sum() == 4
     km = [c for c in R if c.endswith("_km")]
     assert (R[km].dropna() == R[km].dropna().round(0)).all().all()  # whole km
     assert not [c for c in R if "lat" in c.lower() or "lon" in c.lower()]
     T = pd.read_csv(out / "behaviour_tests.csv")
-    a = T[(T.grouping == "rule|adult") & (T.family == "a_shares_scheduled") & (T.variable == "share_k2_flight_sched")].iloc[0]
+    a = T[(T.grouping == "c2024_novmar_basin|rule|adult") & (T.family == "a_shares_scheduled")
+          & (T.variable == "share_k2_flight_sched")].iloc[0]
     assert a.n_migrant == 6 and a.n_resident == 6 and a.diff_mean > 0.15 and a.p_perm < 0.1
-    sp = T[(T.grouping == "rule|adult") & (T.variable == "speed_ms_k2_flight")].iloc[0]
+    sp = T[(T.grouping == "c2024_novmar_basin|rule|adult") & (T.variable == "speed_ms_k2_flight")].iloc[0]
     assert sp.diff_mean > 1.5
     assert (T[T.family == "a_shares_all_modes"].test == "descriptive (not tested)").all()
     clf = pd.read_csv(out / "classifiers.csv")
-    mh = clf[(clf.target == "migrant_vs_resident|rule|adult") & (clf.feature_set == "mean_h")]
+    mh = clf[(clf.target == "migrant_vs_resident|c2024_novmar_basin|rule|adult") & (clf.feature_set == "mean_h")]
     assert len(mh) == 3 and (mh.auc_mean > 0.9).all()  # planted offset in h
     nest = pd.read_csv(out / "nested.csv")
     assert set(nest.run) == {"r6x:flight", "r6x:ground", "r6x:flight_ground"} and (nest.n_perm == 19).all()
     # no planted coordinate or comment text anywhere in the text outputs
     text = "".join((out / f).read_text() for f in ["residency.csv", "agreement.csv", "residency_summary.md",
-                                                  "behaviour_tests.csv", "behaviour_birds.csv", "metadata.json"])
+                                                  "behaviour_tests.csv", "behaviour_birds.csv", "behaviour_groups.csv",
+                                                  "metadata.json"])
     for s in ("44.43", "108.29", "Band XY"):
         assert s not in text
     assert json.loads((out / "metadata.json").read_text())["thresholds"]["MIN_DISP_KM"] == 200

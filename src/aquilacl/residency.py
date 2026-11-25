@@ -21,42 +21,61 @@ Part 1a. NSD models (Bunnefeld et al. 2011), fitted by least squares on NSD (sca
   (ph in [PHI_MIN, PHI_MAX] days, midpoints inside the fitted days). Daily NSD is autocorrelated, so AIC alone
   prefers the sigmoid models for any foray. Acceptance rules (a rejected model gives way to the next by AIC):
   disperser and migrant need sqrt(D) >= MIN_DISP_KM; migrant needs stay >= MIN_STAY_DAYS and the return midpoint
-  inside the fitted days; nomad needs sqrt(b T) >= MIN_DISP_KM. Censoring: 'resident' needs a track that covers
-  spring (daily positions after day FIRST_DAYS in >= 2 of Mar, Apr, May), and 'disperser' needs >= SETTLE_DAYS
-  of track after the departure midpoint (otherwise a migrant that has not yet returned); else 'undetermined'.
+  inside the fitted days; nomad needs sqrt(b T) >= MIN_DISP_KM. Censoring: 'disperser' needs >= SETTLE_DAYS of
+  track after the departure midpoint (otherwise a migrant that has not yet returned), else 'undetermined'.
   Departure / return day-of-year = the dates of the two sigmoid midpoints (half of the NSD change, not onsets).
-Part 1b. Rule classes (whole track): a migration is an excursion that leaves MIN_DISP_KM of the deployment centroid,
-  reaches >= MIGRANT_NORTH_KM north of it, and is back within MIN_DISP_KM within RETURN_WITHIN_DAYS of leaving
-  (departure / return = first day beyond / back within MIN_DISP_KM). Classes in order:
-  insufficient (span < min_days or fewer than min_days/2 daily positions); migrant (>= 1 migration);
-  undetermined (far north without return and the track ends < RETURN_WITHIN_DAYS after leaving);
-  resident (30-day running median of d0 never > MIN_DISP_KM; needs spring coverage, else undetermined);
-  disperser (away > MIN_DISP_KM for the last FINAL_DAYS and continuously for >= SETTLE_DAYS; away for less ->
-  undetermined); nomad (everything else: sustained excursions that end back near the deployment area).
-  The rule class is the primary 'strategy'; 'consensus' is the class where both methods agree.
+Part 1b. Rule classes (primary 'strategy'; whole track; d0 / north0 from the deployment centroid, 30-day running
+  median 'roll' of d0 with >= ROLL_MIN positions). A far-north excursion starts on the first day >= MIGRANT_NORTH_KM
+  north; it is a migration if the bird comes back below RETURN_NORTH_KM north within RETURN_WITHIN_DAYS of leaving
+  (departure / return = first day beyond / back below RETURN_NORTH_KM north; the return is not required to reach the
+  deployment centroid, because birds trapped in October on passage were deployed off their winter range). In order:
+  insufficient      span < min_days or fewer than min_days/2 daily positions;
+  migrant           >= 1 migration;
+  migrant_departed  a far-north excursion that is still open when the track ends (< RETURN_WITHIN_DAYS after leaving;
+                    an open excursion longer than that is 'disperser');
+  resident_full     roll never > MIN_DISP_KM and span >= FULL_YEAR_DAYS;
+  resident_partial  roll never > MIN_DISP_KM, span < FULL_YEAR_DAYS (no spring coverage needed);
+  juvenile_dispersal  tagged-young bird whose roll exceeds MIN_DISP_KM (or that leaves far north without return);
+  disperser         roll > MIN_DISP_KM over the last FINAL_DAYS and continuously away for >= SETTLE_DAYS;
+  away_at_end       away over the last FINAL_DAYS but for < SETTLE_DAYS (settling and a seasonal stay not separable);
+  nomad             everything else: sustained excursions beyond MIN_DISP_KM that end back near the deployment area.
+  Coarse classes for agreement and for part 3: migrant = migrant + migrant_departed; resident = resident_full +
+  resident_partial; disperser = disperser + juvenile_dispersal (+ NSD disperser); nomad; other classes are not compared.
+  NSD 'resident' no longer needs spring coverage either. 'consensus' = the coarse class where both methods agree.
 
 Part 2. Outputs in --out: residency.csv (per bird), agreement.csv, residency_summary.md, nsd_birds.png,
-nsd_by_strategy.png, behaviour_tests.csv, behaviour_birds.csv, classifiers.csv, nested.csv, metadata.json.
+nsd_by_strategy.png, behaviour_groups.csv, behaviour_tests.csv, behaviour_birds.csv (one row per bird and selection),
+classifiers.csv, nested.csv, metadata.json.
 
-Part 3. Behaviour comparison, migrant (1) vs resident (0), bird level. Birds: cohort 2024 (year of the first
-window <= 2024), windows in COMPARE_MONTHS (Nov-Mar) on UTC days on which the bird's daily position is within
-BASIN_KM of the study-area centre (nearest daily position within 2 days). Groupings: rule classes (primary) and
-consensus classes (sensitivity), each for non-young birds ('adult': tagged_young not stated; primary) and all ages.
+Part 3. Behaviour comparison, coarse migrant (1) vs coarse resident (0), bird level. Window days are UTC days
+(t_start floored in UTC); a window is in an area on a day if the nearest daily position within BASIN_FILL_DAYS days is
+inside it. Selections: 'basin' = within BASIN_KM of the study-area centre; 'winter_range' = within BASIN_KM of the
+bird's own Nov-Mar median daily position (EXTRA: migrants and residents are then compared in different places).
+Variants (cohort = year of the first window, 2024 or 2025):
+  c2024_novmar_basin       cohort 2024, COMPARE_MONTHS (Nov-Mar), basin days (the original comparison);
+  all_novmar_basin         all cohorts, Nov-Mar, basin days; permutation within cohort;
+  all_allmonths_basin      all cohorts, all months, basin days; permutation within cohort;
+  all_novmar_winter_range  all cohorts, Nov-Mar, winter-range days (extra, labelled); permutation within cohort.
+Each variant has groupings 'rule' (primary) and 'consensus' (sensitivity), each for non-young birds ('adult': tagged
+young not stated) and all ages. Group sizes (and the cohorts holding both groups) are in behaviour_groups.csv.
 (a) TESTED: share of K=2 flight and of each K=6 state among scheduled (sensitivity_k == 0) windows with a state
     (continuous mode is triggered by fast movement and would inflate flight); birds need >= MIN_SHARE_WINDOWS.
     DESCRIPTIVE: the same shares over all windows.
 (b) TESTED: per-bird medians of speed (m/s), turn radius (m; speed / radians(turn_abs_mean), turn > 0) and climb
     (m/s) in K=2 flight and in each K=6 flight state; GPS is almost only in continuous windows, so these come
     from all windows with GPS (mostly sensitivity_k == 1); birds need >= MIN_STATE_WINDOWS.
-    Tests: difference in means with labels permuted between birds (aquilacl.demography.perm_mean_diff), also
-    within sex strata (missing sex = own stratum); Hedges g; Holm adjustment within each family and grouping.
-    A side needs >= MIN_GROUP_BIRDS birds, else 'not tested'.
-(c) TESTED: grouped-CV logistic classifier (aquilacl.demography.run_classifiers: StratifiedGroupKFold by bird,
-    labels permuted between birds, Freedman-Lane nested null for h beyond nuisance) on the mean L2-normalised h of
-    the run in K=2 flight, in K=2 ground, and both; all windows (recording-mode mix enters through cont_share).
-    Nuisance floor: track days, deploy month (sin, cos), continuous-mode share (all windows of the bird); cohort
-    is constant within cohort 2024 and is added only if it varies. Each h set has its own nuisance spec on the
-    same birds (run tag '<run>:flight' etc.), so the nested comparison uses identical folds.
+    Tests: difference in means with labels permuted between birds (cohort 2024 variant:
+    aquilacl.demography.perm_mean_diff, p_perm_sex_strata within sex). All-cohort variants use only cohorts that hold
+    both groups; the statistic is the weighted within-cohort difference (perm_strat_diff), p_perm permutes within
+    cohort and p_perm_sex_strata within cohort x sex (missing sex = own stratum). Hedges g (pooled); Holm adjustment
+    of p_perm within each family and grouping. A side needs >= MIN_GROUP_BIRDS birds with a value (in cohorts holding
+    both groups), else 'not tested'.
+(c) TESTED (rule groupings only): grouped-CV logistic classifier (aquilacl.demography.run_classifiers: StratifiedGroupKFold
+    by bird, labels permuted between birds (not within cohort), Freedman-Lane nested null for h beyond nuisance) on
+    the mean L2-normalised h of the run in K=2 flight, in K=2 ground, and both; all selected windows. Nuisance floor:
+    track days, deploy month (sin, cos), continuous-mode share (all windows of the bird), and cohort when it varies.
+    Each h set has its own nuisance spec on the same birds (run tag '<run>:flight' etc.), so the nested comparison
+    uses identical folds.
 """
 
 from __future__ import annotations
@@ -83,7 +102,9 @@ FIRST_DAYS = 30
 FIT_DAYS = 425
 MIN_DISP_KM = 200.0
 MIGRANT_NORTH_KM = 1000.0
+RETURN_NORTH_KM = 500.0
 RETURN_WITHIN_DAYS = 365
+FULL_YEAR_DAYS = 330
 MIN_STAY_DAYS = 30
 SETTLE_DAYS = 240
 FINAL_DAYS = 60
@@ -92,6 +113,8 @@ PHI_MIN, PHI_MAX = 1.0, 60.0
 SPRING_MONTHS = (3, 4, 5)
 SUMMER_MONTHS, WINTER_MONTHS = (6, 7, 8), (12, 1, 2)
 COMPARE_MONTHS = (11, 12, 1, 2, 3)
+ALL_MONTHS = tuple(range(1, 13))
+MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 BASIN_KM = 200.0
 BASIN_FILL_DAYS = 2
 MIN_SHARE_WINDOWS = 100
@@ -139,18 +162,50 @@ def read_bird(path: Path, deploy_on) -> dict:
 
 
 def track(daily: pd.DataFrame, centre: tuple[float, float]) -> pd.DataFrame:
-    """Per day: days since deployment, day of year, month, distances (km) and NSD (km^2). No positions returned."""
+    """Per day: days since deployment, day of year, month, distances (km) and NSD (km^2). No positions returned.
+
+    dw_km: distance to the bird's own winter-range centre (median Nov-Mar daily position; NaN without such days)."""
     day = ((daily["date"] - daily["date"].iloc[0]) / pd.Timedelta(days=1)).round().astype(int).to_numpy()
     first = daily[day < FIRST_DAYS]
     c0 = (first.lat.median(), first.lon.median())
-    d0 = hav_km(c0[0], c0[1], daily.lat.to_numpy(), daily.lon.to_numpy())
-    dc = hav_km(centre[0], centre[1], daily.lat.to_numpy(), daily.lon.to_numpy())
-    return pd.DataFrame({"day": day, "epoch_day": ((daily["date"] - pd.Timestamp("1970-01-01", tz="UTC")) //
-                                                   pd.Timedelta(days=1)).to_numpy(),
+    lat, lon = daily.lat.to_numpy(), daily.lon.to_numpy()
+    d0 = hav_km(c0[0], c0[1], lat, lon)
+    dc = hav_km(centre[0], centre[1], lat, lon)
+    win = daily["date"].dt.month.isin(COMPARE_MONTHS).to_numpy()
+    dw = hav_km(np.median(lat[win]), np.median(lon[win]), lat, lon) if win.any() else np.full(len(lat), np.nan)
+    return pd.DataFrame({"day": day, "epoch_day": epoch_days(daily["date"]),
                          "doy": daily["date"].dt.dayofyear.to_numpy(), "month": daily["date"].dt.month.to_numpy(),
                          "year": daily["date"].dt.year.to_numpy(), "d0_km": d0, "nsd_km2": d0 ** 2,
-                         "north0_km": (daily.lat.to_numpy() - c0[0]) * KM_PER_DEG, "dc_km": dc,
-                         "northc_km": (daily.lat.to_numpy() - centre[0]) * KM_PER_DEG})
+                         "north0_km": (lat - c0[0]) * KM_PER_DEG, "dc_km": dc, "dw_km": dw,
+                         "northc_km": (lat - centre[0]) * KM_PER_DEG})
+
+
+def epoch_days(t) -> np.ndarray:
+    """UTC day number (days since 1970-01-01) of timestamps; tz-naive input is taken as UTC."""
+    t = pd.to_datetime(pd.Series(t), utc=True)
+    return ((t - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(days=1)).to_numpy(np.int64)
+
+
+def area_days(epoch_day: np.ndarray, dist_km: np.ndarray, max_km: float = BASIN_KM,
+              fill: int = BASIN_FILL_DAYS) -> np.ndarray:
+    """Epoch days (sorted) on which the nearest daily position within `fill` days is within max_km.
+
+    Days with a position use it; days without one use the nearest position (ties: the earlier day)."""
+    e = np.asarray(epoch_day, np.int64)
+    dist = np.asarray(dist_km, float)
+    ok = np.isfinite(dist)
+    e, dist = e[ok], dist[ok]
+    if not len(e):
+        return np.array([], np.int64)
+    o = np.argsort(e)
+    e, dist = e[o], dist[o]
+    allday = np.arange(e[0] - fill, e[-1] + fill + 1)
+    j = np.searchsorted(e, allday)
+    lo, hi = np.clip(j - 1, 0, len(e) - 1), np.clip(j, 0, len(e) - 1)
+    dlo, dhi = np.abs(allday - e[lo]), np.abs(e[hi] - allday)
+    near = np.where(dhi < dlo, hi, lo)
+    gap = np.minimum(dlo, dhi)
+    return allday[(gap <= fill) & (dist[near] <= max_km)]
 
 
 def covers_spring(tr: pd.DataFrame) -> bool:
@@ -260,8 +315,6 @@ def nsd_classify(tr: pd.DataFrame, min_days: int) -> dict:
         res["nsd_delta_km"] = float(np.sqrt(p[0]))
     if chosen == "migrant":
         res["dep_doy_nsd"], res["ret_doy_nsd"] = _doy(tr, p[1]), _doy(tr, p[1] + p[3])
-    if chosen == "resident" and not covers_spring(w):
-        cls, note = "undetermined", "no spring coverage"
     if chosen == "disperser" and span - p[1] < SETTLE_DAYS:
         cls, note = "undetermined", "away at track end; too short to tell settling from a seasonal stay"
     res["nsd_class"], res["nsd_note"] = cls, note.strip("; ")
@@ -270,24 +323,25 @@ def nsd_classify(tr: pd.DataFrame, min_days: int) -> dict:
 
 # ---------------------------------------------------------------- rule classes
 
-def rule_classify(tr: pd.DataFrame, min_days: int) -> dict:
+def rule_classify(tr: pd.DataFrame, min_days: int, young: bool = False) -> dict:
+    """Rule class of one track (module docstring, Part 1b)."""
     span = int(tr.day.max()) if len(tr) else 0
-    res = {"rule_class": "insufficient", "rule_note": "", "n_migrations": 0,
+    res = {"rule_class": "insufficient", "rule_note": "", "n_migrations": 0, "max_roll_d0_km": np.nan,
            **{f"{k}_doy_rule_y{i}": np.nan for i in (1, 2) for k in ("dep", "ret")}}
     if span < min_days or len(tr) < min_days / 2:
         res["rule_note"] = "short track"
         return res
     day, d0, n0 = tr.day.to_numpy(), tr.d0_km.to_numpy(), tr.north0_km.to_numpy()
-    near, far = d0 < MIN_DISP_KM, n0 >= MIGRANT_NORTH_KM
+    far, south = n0 >= MIGRANT_NORTH_KM, n0 < RETURN_NORTH_KM
     events, far_open, cur = [], None, -1
     while True:
         fi = np.flatnonzero(far & (day > cur))
         if not len(fi):
             break
         f = fi[0]
-        before = np.flatnonzero(near[:f])
+        before = np.flatnonzero(south[:f])
         dep = before[-1] + 1 if len(before) else 0
-        after = np.flatnonzero(near[f:])
+        after = np.flatnonzero(south[f:])
         if not len(after):
             far_open = dep
             break
@@ -300,22 +354,39 @@ def rule_classify(tr: pd.DataFrame, min_days: int) -> dict:
         res[f"dep_doy_rule_y{i}"], res[f"ret_doy_rule_y{i}"] = float(tr.doy.iat[a]), float(tr.doy.iat[b])
     full = pd.Series(d0, index=day).reindex(np.arange(span + 1))
     roll = full.rolling(ROLL_DAYS, min_periods=ROLL_MIN, center=True).median()
+    res["max_roll_d0_km"] = float(roll.max()) if roll.notna().any() else np.nan
+    stays = not (roll > MIN_DISP_KM).any()
     last = d0[day > span - FINAL_DAYS]
-    back = np.flatnonzero(near)
+    back = np.flatnonzero(d0 < MIN_DISP_KM)
     away_since = day[back[-1]] + 1 if len(back) else 0
     if events:
         cls, note = "migrant", ""
-    elif far_open is not None and span - day[far_open] < RETURN_WITHIN_DAYS:
-        cls, note = "undetermined", "far north without return; track ends before a return is possible"
-    elif not (roll > MIN_DISP_KM).any():
-        cls, note = ("resident", "") if covers_spring(tr) else ("undetermined", "no spring coverage")
+    elif far_open is not None and not young:
+        cls, note = (("migrant_departed", "far north at track end") if span - day[far_open] < RETURN_WITHIN_DAYS
+                     else ("disperser", "far north for over a year"))
+    elif stays:
+        cls, note = ("resident_full", "") if span >= FULL_YEAR_DAYS else ("resident_partial", "track < full year")
+    elif young:
+        cls, note = "juvenile_dispersal", ""
     elif len(last) and np.median(last) > MIN_DISP_KM:
         cls, note = ("disperser", "") if span - away_since >= SETTLE_DAYS else \
-            ("undetermined", "away at track end; too short to tell settling from a seasonal stay")
+            ("away_at_end", "away at track end; too short to tell settling from a seasonal stay")
     else:
         cls, note = "nomad", ""
     res["rule_class"], res["rule_note"] = cls, note
     return res
+
+
+COARSE = {"migrant": "migrant", "migrant_departed": "migrant", "resident": "resident", "resident_full": "resident",
+          "resident_partial": "resident", "disperser": "disperser", "juvenile_dispersal": "disperser",
+          "nomad": "nomad"}
+RULE_CLASSES = ("migrant", "migrant_departed", "resident_full", "resident_partial", "juvenile_dispersal",
+                "disperser", "away_at_end", "nomad", "insufficient")
+
+
+def coarse(cls) -> str:
+    """Coarse class shared by both methods ('other' = not compared: insufficient, undetermined, away_at_end)."""
+    return COARSE.get(cls, "other")
 
 
 def distances(tr: pd.DataFrame) -> dict:
@@ -326,12 +397,14 @@ def distances(tr: pd.DataFrame) -> dict:
             "max_dist_km": float(tr.dc_km.max()), "max_north_km": float(tr.northc_km.max()),
             "max_dist_deploy_km": float(tr.d0_km.max()), "max_north_deploy_km": float(tr.north0_km.max()),
             "summer_dist_km": med(SUMMER_MONTHS), "winter_dist_km": med(WINTER_MONTHS),
-            "basin_days_share": float((tr.dc_km <= BASIN_KM).mean())}
+            "basin_days_share": float((tr.dc_km <= BASIN_KM).mean()),
+            "winter_basin_share": float((tr.loc[tr.month.isin(COMPARE_MONTHS), "dc_km"] <= BASIN_KM).mean())
+            if tr.month.isin(COMPARE_MONTHS).any() else np.nan}
 
 
-def classify_bird(tr: pd.DataFrame, min_days: int) -> dict:
+def classify_bird(tr: pd.DataFrame, min_days: int, young: bool = False) -> dict:
     n = nsd_classify(tr, min_days)
-    r = rule_classify(tr, min_days)
+    r = rule_classify(tr, min_days, young)
     return {**distances(tr), **{k: v for k, v in n.items() if k != "fit"}, **r, "_fit": n["fit"]}
 
 
@@ -352,18 +425,23 @@ def _states(rows, n: int, col: str) -> np.ndarray:
     return s
 
 
-def behaviour_bird(d: Path, run: Path, st2, st6, basin_days: np.ndarray, state_col: str, months=COMPARE_MONTHS) -> dict:
-    """Bird aggregates for part 3 (see module docstring)."""
-    m = _read(d / "meta.parquet", ["t_start", "sensitivity_k"])
-    n = len(m)
-    t = pd.to_datetime(m["t_start"], utc=True).reset_index(drop=True)
-    k = m["sensitivity_k"].to_numpy()
-    res = {"bird": d.name, "first": t.min(), "last": t.max(), "n_all": n,
-           "cont_share": float((k == 1).mean()) if n else np.nan}
-    eday = ((t - pd.Timestamp("1970-01-01", tz="UTC")) // pd.Timedelta(days=1)).to_numpy()
-    sel = t.dt.month.isin(months).to_numpy() & np.isin(eday, basin_days)
-    res["n_sel"] = int(sel.sum())
-    s2, s6 = _states(st2, n, state_col), _states(st6, n, state_col)
+SELECTIONS = {"novmar_basin": ("dc_km", COMPARE_MONTHS), "allmonths_basin": ("dc_km", ALL_MONTHS),
+              "novmar_winter_range": ("dw_km", COMPARE_MONTHS)}
+VARIANTS = {"c2024_novmar_basin": ("novmar_basin", "2024"), "all_novmar_basin": ("novmar_basin", None),
+            "all_allmonths_basin": ("allmonths_basin", None), "all_novmar_winter_range": ("novmar_winter_range", None)}
+EXTRA_VARIANTS = ("all_novmar_winter_range",)
+
+
+def window_selection(t_start, sel_days: dict) -> dict:
+    """Boolean window masks per selection: month in the selection's months and UTC day in its area days."""
+    t = pd.to_datetime(pd.Series(t_start), utc=True).reset_index(drop=True)
+    eday, month = epoch_days(t), t.dt.month.to_numpy()
+    return {name: np.isin(month, months) & np.isin(eday, days) for name, (days, months) in sel_days.items()}
+
+
+def _aggregates(sel, eday, month, k, s2, s6, sp, rad, cl, h) -> dict:
+    res = {"n_sel": int(sel.sum()), "n_sel_days": int(len(np.unique(eday[sel])))}
+    res.update({f"n_sel_month{mo:02d}": int((sel & (month == mo)).sum()) for mo in range(1, 13)})
     k0 = sel & (k == 0)
     for tag, s, names in (("k2", s2, STATES2), ("k6", s6, STATES6)):
         for mode, msk in (("sched", k0), ("all", sel)):
@@ -373,11 +451,6 @@ def behaviour_bird(d: Path, run: Path, st2, st6, basin_days: np.ndarray, state_c
                 if tag == "k2" and c == 0:
                     continue
                 res[f"share_{tag}_{name}_{mode}"] = float((s[ok] == c).mean()) if ok.any() else np.nan
-    f = _read(d / "features.parquet", ["speed_mean", "turn_abs_mean", "climb_mean"]).reindex(
-        columns=["speed_mean", "turn_abs_mean", "climb_mean"])
-    sp, tu, cl = (f[c].to_numpy(float) for c in f.columns)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        rad = np.where(tu > 0, sp / np.radians(tu), np.nan)
     groups = {"k2_flight": s2 == 1, **{f"k6_{STATES6[c]}": s6 == c for c in FLIGHT6}}
     for g, msk in groups.items():
         w = sel & msk & np.isfinite(sp)
@@ -387,15 +460,36 @@ def behaviour_bird(d: Path, run: Path, st2, st6, basin_days: np.ndarray, state_c
             x = a[w]
             x = x[np.isfinite(x)]
             res[f"{v}_{g}"] = float(np.median(x)) if len(x) >= MIN_STATE_WINDOWS else np.nan
+    for c, name in STATES2.items():
+        w = sel & (s2 == c)
+        res[f"n_h_{name}"] = int(w.sum())
+        res[f"h_{name}"] = h[w].mean(0) if w.sum() >= MIN_STATE_WINDOWS else np.full(h.shape[1], np.nan)
+    return res
+
+
+def behaviour_bird(d: Path, run: Path, st2, st6, sel_days: dict, state_col: str) -> dict:
+    """Bird aggregates for part 3 per selection (sel_days: name -> (area epoch days, months))."""
+    m = _read(d / "meta.parquet", ["t_start", "sensitivity_k"])
+    n = len(m)
+    t = pd.to_datetime(m["t_start"], utc=True).reset_index(drop=True)
+    k = m["sensitivity_k"].to_numpy()
+    res = {"bird": d.name, "first": t.min(), "last": t.max(), "n_all": n,
+           "cont_share": float((k == 1).mean()) if n else np.nan}
+    s2, s6 = _states(st2, n, state_col), _states(st6, n, state_col)
+    f = _read(d / "features.parquet", ["speed_mean", "turn_abs_mean", "climb_mean"]).reindex(
+        columns=["speed_mean", "turn_abs_mean", "climb_mean"])
+    sp, tu, cl = (f[c].to_numpy(float) for c in f.columns)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        rad = np.where(tu > 0, sp / np.radians(tu), np.nan)
     h = np.load(run / "embeddings" / f"{d.name}.npz")["h"]
     if len(h) != n:
         raise ValueError("embedding rows differ from the windows of one bird")
     h = h.astype(np.float32)
     h /= np.maximum(np.linalg.norm(h, axis=1, keepdims=True), 1e-12)
-    for c, name in STATES2.items():
-        w = sel & (s2 == c)
-        res[f"n_h_{name}"] = int(w.sum())
-        res[f"h_{name}"] = h[w].mean(0) if w.sum() >= MIN_STATE_WINDOWS else np.full(h.shape[1], np.nan)
+    masks = window_selection(t, sel_days)
+    eday = epoch_days(t)
+    month = t.dt.month.to_numpy()
+    res["sel"] = {name: _aggregates(msk, eday, month, k, s2, s6, sp, rad, cl, h) for name, msk in masks.items()}
     return res
 
 
@@ -413,29 +507,94 @@ def holm(p: np.ndarray) -> np.ndarray:
     return out
 
 
+def _strata_codes(*cols: pd.Series) -> np.ndarray:
+    key = pd.concat([c.astype(object).fillna("missing").astype(str) for c in cols], axis=1).agg("|".join, axis=1)
+    return pd.Categorical(key).codes
+
+
+def informative_strata(y: np.ndarray, strata: np.ndarray | None) -> tuple[int, int]:
+    """(strata holding both groups, birds in them); without strata the whole sample is one stratum."""
+    strata = np.zeros(len(y), int) if strata is None else np.asarray(strata)
+    n_s = n_b = 0
+    for s in np.unique(strata):
+        ys = y[strata == s]
+        if 0 < ys.sum() < len(ys):
+            n_s, n_b = n_s + 1, n_b + len(ys)
+    return n_s, n_b
+
+
+def perm_strat_diff(x: np.ndarray, y: np.ndarray, strata: np.ndarray, n_perm: int, rng) -> tuple[float, float]:
+    """Within-stratum difference in means (migrant minus resident), averaged over strata holding both groups with
+    weights n1 n0 / (n1 + n0), and its two-sided p with labels permuted between birds within strata. With one
+    stratum this is the plain difference in means."""
+    x, y, strata = np.asarray(x, float), np.asarray(y, int), np.asarray(strata)
+
+    def stat(L):  # L: (P, n) labels
+        num = np.zeros(len(L))
+        den = 0.0
+        for s in np.unique(strata):
+            ix = np.flatnonzero(strata == s)
+            n1 = int(y[ix].sum())
+            n0 = len(ix) - n1
+            if not n1 or not n0:
+                continue
+            Ls = L[:, ix].astype(float)
+            w = n1 * n0 / (n1 + n0)
+            num += w * ((Ls @ x[ix]) / n1 - ((1 - Ls) @ x[ix]) / n0)
+            den += w
+        return num / den if den else np.full(len(L), np.nan)
+
+    obs = float(stat(y[None, :])[0])
+    L = np.tile(y, (n_perm, 1))
+    for s in np.unique(strata):
+        ix = np.flatnonzero(strata == s)
+        for i in range(n_perm):
+            L[i, ix] = y[ix][rng.permutation(len(ix))]
+    d = stat(L)
+    return obs, float((1 + (np.abs(d) >= abs(obs) - 1e-12).sum()) / (1 + n_perm))
+
+
 def compare_table(V: pd.DataFrame, lab: pd.Series, sex: pd.Series, family: str, grouping: str, n_perm: int, rng,
-               tested: bool = True) -> list[dict]:
+                  tested: bool = True, cohort: pd.Series | None = None) -> list[dict]:
+    """Migrant vs resident per variable. With cohort given, only birds of cohorts holding both groups count (n_*,
+    means, g, the >= MIN_GROUP_BIRDS gate and the tests); the tested diff_mean is then the weighted within-cohort
+    difference (perm_strat_diff) with p_perm permuting within cohort, and p_perm_sex_strata within cohort x sex
+    (same statistic over cohort x sex strata). hedges_g is over the pooled birds of those cohorts. n_*_all_cohorts:
+    birds with a value before the restriction."""
     rows = []
     for c in V.columns:
         v = V[c].astype(float)
         ok = v.notna() & lab.notna()
+        n_all = (int((lab[ok] == 1).sum()), int((lab[ok] == 0).sum()))
+        if cohort is not None:  # only cohorts holding both groups enter the effect and the test
+            both = lab[ok].groupby(cohort[ok]).transform(lambda q: 0 < q.sum() < len(q))
+            ok = ok & both.reindex(ok.index, fill_value=False).astype(bool)
         x, y = v[ok].to_numpy(), lab[ok].astype(int).to_numpy()
         a, b = x[y == 1], x[y == 0]
+        st1 = _strata_codes(cohort[ok]) if cohort is not None else None
+        st2 = _strata_codes(*([cohort[ok]] if cohort is not None else []), sex[ok])
         row = {"grouping": grouping, "family": family, "variable": c, "n_migrant": len(a), "n_resident": len(b),
+               "n_migrant_all_cohorts": n_all[0], "n_resident_all_cohorts": n_all[1],
                "mean_migrant": a.mean() if len(a) else np.nan, "mean_resident": b.mean() if len(b) else np.nan,
                "median_migrant": np.median(a) if len(a) else np.nan,
                "median_resident": np.median(b) if len(b) else np.nan,
                "diff_mean": a.mean() - b.mean() if len(a) and len(b) else np.nan,
                "hedges_g": dm.hedges_g(a, b) if len(a) and len(b) else np.nan}
+        row["informative_strata"], row["birds_in_informative_strata"] = informative_strata(y, st1)
         if not tested:
             row["test"] = "descriptive (not tested)"
         elif min(len(a), len(b)) < MIN_GROUP_BIRDS:
             row["test"] = f"not tested: a group has < {MIN_GROUP_BIRDS} birds"
         else:
-            d, p = dm.perm_mean_diff(x, y, n_perm, rng)
-            strata = pd.Categorical(sex[ok].fillna("missing")).codes
-            _, ps = dm.perm_mean_diff(x, y, n_perm, rng, strata)
-            row.update({"test": f"bird-label permutation ({n_perm})", "diff_mean": d, "p_perm": p, "p_perm_sex_strata": ps})
+            if st1 is None:
+                d, p = dm.perm_mean_diff(x, y, n_perm, rng)
+                _, ps = dm.perm_mean_diff(x, y, n_perm, rng, st2)
+            else:  # cohort-stratified statistic: cohort levels do not enter the difference
+                d, p = perm_strat_diff(x, y, st1, n_perm, rng)
+                _, ps = perm_strat_diff(x, y, st2, n_perm, rng)
+            strat = "within cohort" if cohort is not None else "unstratified"
+            row.update({"test": f"bird-label permutation ({n_perm}, {strat})", "diff_mean": d, "p_perm": p,
+                        "p_perm_sex_strata": ps})
         rows.append(row)
     return rows
 
@@ -450,8 +609,8 @@ def nuisance(B: pd.DataFrame) -> pd.DataFrame:
     return X
 
 
-def h_frame(P: dict, birds, key: str) -> pd.DataFrame:
-    H = np.stack([P[b][f"h_{key}"] for b in birds])
+def h_frame(P: dict, birds, key: str, sel: str) -> pd.DataFrame:
+    H = np.stack([P[b]["sel"][sel][f"h_{key}"] for b in birds])
     return pd.DataFrame(H, index=pd.Index(birds, name="bird"), columns=[f"{key}_h{i}" for i in range(H.shape[1])])
 
 
@@ -490,11 +649,10 @@ def fig_nsd_birds(R: pd.DataFrame, tracks: dict, path: Path) -> None:
 
 def fig_nsd_by_strategy(R: pd.DataFrame, tracks: dict, path: Path) -> None:
     plt = _plt()
-    classes = [c for c in ("resident", "migrant", "disperser", "nomad", "undetermined", "insufficient")
-               if (R.strategy == c).any()]
+    classes = [c for c in RULE_CLASSES if (R.strategy == c).any()]
     if not classes:
         return
-    fig, axes = plt.subplots(1, len(classes), figsize=(3.4 * len(classes), 3.2), squeeze=False, sharey=True)
+    fig, axes = plt.subplots(1, len(classes), figsize=(3.0 * len(classes), 3.2), squeeze=False, sharey=True)
     for ax, c in zip(axes[0], classes):
         bs = [b for b in R.index[R.strategy == c] if b in tracks]
         for b in bs:
@@ -531,48 +689,66 @@ def _md(df: pd.DataFrame) -> list[str]:
 def write_summary(out: Path, R: pd.DataFrame, agree: pd.DataFrame, kappa: dict, groups: pd.DataFrame,
                   T: pd.DataFrame, clf: pd.DataFrame, nest: pd.DataFrame, meta: dict) -> None:
     L = ["# Residency from GPS tracks, and migrants vs residents", "",
-         "No coordinates are stored: distances in km (rounded), day-of-year, classes. Thresholds and model "
+         "No coordinates are stored: distances in km (rounded), day-of-year, classes. Thresholds and class "
          "definitions: module docstring of aquilacl.residency and metadata.json.", "",
          "## 1. Strategy per bird (descriptive)", "",
-         "Rule classes (primary) by age group (young = tagged as young; other = age not stated):", ""]
-    R2 = R.assign(age=np.where(R.young, "young", "other"))
-    L += _md(pd.crosstab(R2.strategy, R2.age).reset_index())
+         "Rule classes (primary) by cohort, age group (young = tagged as young; other = age not stated) and the "
+         "reference 'migrant' flag:", ""]
+    R2 = R.assign(group=R.cohort.astype(str) + "|" + np.where(R.young, "young", "other") + "|" +
+                  np.where(R.migrant_flag, "flagged", "not flagged"))
+    ct = pd.crosstab(R2.strategy, R2.group).reindex([c for c in RULE_CLASSES if c in set(R2.strategy)])
+    ct.loc["total"] = ct.sum()
+    L += _md(ct.reset_index())
     L += ["", "NSD-model classes (Bunnefeld et al. 2011, AIC with acceptance rules) by age group:", ""]
-    L += _md(pd.crosstab(R2.strategy_nsd, R2.age).reset_index())
-    L += ["", "### Agreement between the two methods (rows: rule, columns: NSD; descriptive)", ""]
-    L += _md(pd.crosstab(R.strategy, R.strategy_nsd).reset_index())
-    L += ["", f"Birds classified by both (no insufficient/undetermined): {kappa['n']}; agreement "
-          f"{_f(kappa['agree'])}; Cohen's kappa {_f(kappa['kappa'])}.", "",
+    L += _md(pd.crosstab(R2.strategy_nsd, np.where(R.young, "young", "other")).reset_index())
+    L += ["", "### Agreement between the two methods on coarse classes (rows: rule, columns: NSD; descriptive)", "",
+          "Coarse classes: migrant = migrant + migrant_departed; resident = resident_full + resident_partial; "
+          "disperser = disperser + juvenile_dispersal (NSD: disperser); nomad; other = insufficient, undetermined, "
+          "away_at_end (not compared).", ""]
+    L += _md(pd.crosstab(R.strategy_coarse, R.strategy_nsd_coarse).reset_index())
+    L += ["", f"Birds with a compared class in both methods: {kappa['n']}; agreement {_f(kappa['agree'])}; "
+          f"Cohen's kappa {_f(kappa['kappa'])}.", "",
           "### Agreement with the reference 'migrant' flag (True or not stated; descriptive)", ""]
     L += _md(agree)
     mig = R[R.strategy == "migrant"]
-    L += ["", "### Migration timing and ranges of rule migrants (descriptive)", "",
-          f"- Rule migrants: {len(mig)} ({int(mig.young.sum())} tagged young).",
-          f"- Departure day-of-year (rule, first migration): median {_f(mig.dep_doy_rule_y1.median())}, "
-          f"range {_f(mig.dep_doy_rule_y1.min())}-{_f(mig.dep_doy_rule_y1.max())}; return: median "
-          f"{_f(mig.ret_doy_rule_y1.median())}, range {_f(mig.ret_doy_rule_y1.min())}-{_f(mig.ret_doy_rule_y1.max())}.",
+    L += ["", "### Migration timing and ranges (descriptive)", "",
+          f"- Rule migrants with a return: {len(mig)}; migrant_departed (far north at track end): "
+          f"{int((R.strategy == 'migrant_departed').sum())}; tagged young among both: "
+          f"{int(R.young[R.strategy_coarse == 'migrant'].sum())}.",
+          f"- Departure day-of-year (rule, first migration; first day beyond {RETURN_NORTH_KM:.0f} km north): median "
+          f"{_f(mig.dep_doy_rule_y1.median())}, range {_f(mig.dep_doy_rule_y1.min())}-{_f(mig.dep_doy_rule_y1.max())}; "
+          f"return: median {_f(mig.ret_doy_rule_y1.median())}, range {_f(mig.ret_doy_rule_y1.min())}-"
+          f"{_f(mig.ret_doy_rule_y1.max())}.",
           f"- Sigmoid midpoints (NSD migrant fits, {int(R.dep_doy_nsd.notna().sum())} birds): departure median "
           f"{_f(R.dep_doy_nsd.median())}, return median {_f(R.ret_doy_nsd.median())} (midpoints, not onsets).",
-          "", "Median distances (km) from the study-area centre per rule class:", ""]
-    L += _md(R.groupby("strategy")[["max_dist_km", "max_north_km", "summer_dist_km", "winter_dist_km"]].median()
-             .round(0).reset_index())
-    L += ["", "## 2. Behaviour: migrants vs residents, cohort 2024, Nov-Mar, days in the basin", "",
-          f"Windows on UTC days with the daily position within {BASIN_KM:.0f} km of the study-area centre. "
-          "Groupings: 'rule' (primary) and 'consensus' (both methods agree; sensitivity); 'adult' = age not "
-          "stated (primary), 'all' = including tagged-young birds.", ""]
+          "", "Median distances (km) per rule class (dist / north: from the study-area centre; winter_basin_share: "
+          f"share of Nov-Mar daily positions within {BASIN_KM:.0f} km of the centre):", ""]
+    med = R.groupby("strategy")[["max_dist_km", "max_north_km", "max_north_deploy_km", "summer_dist_km",
+                                 "winter_dist_km", "winter_basin_share"]].median()
+    L += _md(med.round(0).assign(winter_basin_share=med.winter_basin_share.round(2)).reset_index())
+    L += ["", "## 2. Behaviour: coarse migrants vs coarse residents", "",
+          "Variants (module docstring, Part 3): c2024_novmar_basin (the original comparison), all_novmar_basin and "
+          "all_allmonths_basin (cohort as permutation stratum and nuisance), all_novmar_winter_range (EXTRA: each "
+          "bird on its own winter range, so the two groups are compared in different places). Groupings: 'rule' "
+          "(primary) and 'consensus' (sensitivity); 'adult' = age not stated, 'all' = including tagged young.", "",
+          "### Birds per group", ""]
     L += _md(groups)
+    show = ["grouping", "variable", "n_migrant", "n_resident", "median_migrant", "median_resident", "diff_mean",
+            "hedges_g", "p_perm", "p_perm_sex_strata", "p_holm", "informative_strata"]
     for fam, title in (("a_shares_scheduled", "(a) TESTED: state shares among scheduled (k=0) windows"),
                        ("a_shares_all_modes", "(a') DESCRIPTIVE: state shares among all windows (trigger-biased)"),
                        ("b_kinematics", "(b) TESTED: flight kinematics (per-bird medians; windows with GPS, "
                                         "mostly continuous mode)")):
-        S = T[T.family == fam]
+        S = T[T.family == fam] if len(T) else T
         if not len(S):
             continue
-        cols = [c for c in ["grouping", "variable", "n_migrant", "n_resident", "median_migrant", "median_resident",
-                            "diff_mean", "hedges_g", "p_perm", "p_perm_sex_strata", "p_holm", "test"] if c in S]
-        L += ["", f"### {title}", ""] + _md(S[cols])
-    L += ["", "### (c) TESTED: classifier on mean h in K=2 flight / ground (bird-level AUC, grouped CV, "
-          "bird-label permutation)", ""]
+        big = S[(S.n_migrant >= MIN_GROUP_BIRDS) & (S.n_resident >= MIN_GROUP_BIRDS)]
+        L += ["", f"### {title}", "",
+              f"Rows with >= {MIN_GROUP_BIRDS} birds in both groups: {len(big)} of {len(S)} (all rows, with bird "
+              "counts, in behaviour_tests.csv).", ""]
+        L += _md(big[[c for c in show if c in big]]) if len(big) else ["(none)"]
+    L += ["", "### (c) TESTED: classifier on mean h in K=2 flight / ground (rule groupings; bird-level AUC, grouped "
+          "CV, bird-label permutation)", ""]
     if len(clf):
         L += _md(clf[["run", "target", "feature_set", "n_pos_birds", "n_neg_birds", "auc_mean", "auc_sd",
                       "null_auc_q95", "p_auc"]])
@@ -580,14 +756,22 @@ def write_summary(out: Path, R: pd.DataFrame, agree: pd.DataFrame, kappa: dict, 
         L += _md(nest[["run", "target", "delta_auc_mean", "delta_auc_sd", "n_perm", "p_delta_auc"]]) if len(nest) \
             else ["(none)"]
     else:
-        L += ["not tested: too few birds per group"]
+        L += [f"not tested: no grouping has >= {MIN_GROUP_BIRDS} birds per group with mean h"]
     L += ["", "## Caveats", "",
           "- Shares are window shares of scheduled bursts (k=0), not time budgets; kinematics come from continuous "
           "mode, which starts on fast movement.",
-          "- Migrant-flagged birds were mostly deployed in October; deploy month is in the nuisance floor, and a "
-          "high floor AUC is the expected confound.",
-          "- p-values are uncorrected unless in p_holm (Holm within family and grouping). Female birds fly faster "
-          "and turn wider: p_perm_sex_strata permutes labels within sex.",
+          "- Migrants spend few of their days within the basin radius (winter_basin_share above); basin variants "
+          "compare the migrants' rare basin days with the residents' usual days. The winter-range variant compares "
+          "birds in different places (place and strategy are confounded).",
+          "- Migrant-flagged birds were mostly deployed in October; deploy month and cohort are in the nuisance "
+          "floor, and a high floor AUC is the expected confound. The classifier null permutes labels between all "
+          "birds (not within cohort).",
+          "- p-values are uncorrected unless in p_holm (Holm within family and grouping, on p_perm). Female birds "
+          "fly faster and turn wider: p_perm_sex_strata permutes labels within cohort x sex.",
+          "- All-cohort variants: only cohorts holding both groups enter n, the effect and the test "
+          "(n_*_all_cohorts in behaviour_tests.csv gives the counts before this); the tested diff_mean is the "
+          "weighted within-cohort difference. Residents with short tracks contribute few days, mostly at the start "
+          "of the selected months (month mix per group in behaviour_groups.csv).",
           f"- Runtime {meta.get('runtime_s')} s."]
     (out / "residency_summary.md").write_text("\n".join(L) + "\n")
 
@@ -609,38 +793,9 @@ def run(gps: Path, windows: Path, ref_csv: Path, states2: Path, states6: Path, r
     log(f"{len(files)} GPS files, {len(wdirs)} birds with windows")
 
     # part 1: tracks (positions in memory only)
-    G = Parallel(n_jobs=workers)(delayed(read_bird)(f, ref.at[f.stem, "deploy_on"]) for f in files)
-    G = [g for g in G if g["daily"] is not None and len(g["daily"])]
-    centre = tuple(np.median(np.array([g["median"] for g in G]), axis=0))
-    tracks, rows = {}, []
-    for g in G:
-        tr = track(g["daily"], centre)
-        c = classify_bird(tr, min_days)
-        tracks[g["bird"]] = (tr, c.pop("_fit"))
-        rows.append({"bird": g["bird"], "gps_first_year": int(tr.year.iat[0]), **c})
-    del G
-    R = pd.DataFrame(rows).set_index("bird")
-    R["young"] = ref.loc[R.index, "tagged_young"].notna().to_numpy()
-    R["migrant_flag"] = ref.loc[R.index, "migrant"].notna().to_numpy()
-    R["sex"] = ref.loc[R.index, "sex"].to_numpy()
-    R["strategy"] = R["rule_class"]
-    R["strategy_nsd"] = R["nsd_class"]
-    R["consensus"] = np.where(R.strategy == R.strategy_nsd, R.strategy, "disagree")
+    tracks, R = classify_all(files, ref, min_days, workers)
     log(f"part 1: {len(R)} birds classified ({time.time() - t0:.0f} s)")
-
-    both = ~R.strategy.isin(["insufficient", "undetermined"]) & ~R.strategy_nsd.isin(["insufficient", "undetermined"])
-    kappa = {"n": int(both.sum()), "agree": float((R.strategy[both] == R.strategy_nsd[both]).mean()) if both.any() else np.nan,
-             "kappa": float(cohen_kappa_score(R.strategy[both], R.strategy_nsd[both])) if both.sum() > 1 else np.nan}
-    ag = []
-    for meth, col in (("rule", "strategy"), ("nsd", "strategy_nsd"), ("consensus", "consensus")):
-        for age, sub in (("other", R[~R.young]), ("young", R[R.young])):
-            for flag, s in (("flagged migrant", sub[sub.migrant_flag]), ("not flagged", sub[~sub.migrant_flag])):
-                vc = s[col].value_counts()
-                ag.append({"method": meth, "age": age, "flag": flag, "birds": len(s),
-                           **{c: int(vc.get(c, 0)) for c in ("migrant", "resident", "disperser", "nomad",
-                                                             "undetermined", "insufficient", "disagree")}})
-    agree = pd.DataFrame(ag)
-    agree = agree.loc[:, (agree != 0).any(axis=0) | agree.columns.isin(["birds"])]
+    kappa, agree = agreement(R)
     wfirst = {b: pd.read_parquet(d / "meta.parquet", columns=["t_start"])["t_start"].min() for b, d in wdirs.items()}
     R["cohort"] = [("2024" if pd.Timestamp(wfirst[b]).year <= 2024 else "2025") if b in wfirst else
                    ("2024" if R.at[b, "gps_first_year"] <= 2024 else "2025") for b in R.index]
@@ -649,12 +804,13 @@ def run(gps: Path, windows: Path, ref_csv: Path, states2: Path, states6: Path, r
     R[km] = R[km].round(0)
     doy = [c for c in R if "_doy_" in c]
     R[doy] = R[doy].round(0)
-    R["basin_days_share"] = R["basin_days_share"].round(3)
-    cols = ["young", "migrant_flag", "sex", "cohort", "cohort_source", "strategy", "strategy_nsd", "consensus",
-            "rule_note", "nsd_note", "track_days", "n_days", "covers_spring", "max_dist_km", "max_north_km",
-            "max_dist_deploy_km", "max_north_deploy_km", "summer_dist_km", "winter_dist_km", "basin_days_share",
-            "n_migrations", "dep_doy_rule_y1", "ret_doy_rule_y1", "dep_doy_rule_y2", "ret_doy_rule_y2",
-            "nsd_best_aic", "nsd_delta_km", "dep_doy_nsd", "ret_doy_nsd"] + [f"daic_{m}" for m in MODELS]
+    R[["basin_days_share", "winter_basin_share"]] = R[["basin_days_share", "winter_basin_share"]].round(3)
+    cols = ["young", "migrant_flag", "sex", "cohort", "cohort_source", "strategy", "strategy_coarse", "strategy_nsd",
+            "strategy_nsd_coarse", "consensus", "rule_note", "nsd_note", "track_days", "n_days", "covers_spring",
+            "max_dist_km", "max_north_km", "max_dist_deploy_km", "max_north_deploy_km", "max_roll_d0_km",
+            "summer_dist_km", "winter_dist_km", "basin_days_share", "winter_basin_share", "n_migrations",
+            "dep_doy_rule_y1", "ret_doy_rule_y1", "dep_doy_rule_y2", "ret_doy_rule_y2", "nsd_best_aic",
+            "nsd_delta_km", "dep_doy_nsd", "ret_doy_nsd"] + [f"daic_{m}" for m in MODELS]
     out.mkdir(parents=True, exist_ok=True)  # part 1 outputs first, so they survive a failure in part 3
     R[cols].reset_index().to_csv(out / "residency.csv", index=False)
     agree.to_csv(out / "agreement.csv", index=False)
@@ -662,13 +818,9 @@ def run(gps: Path, windows: Path, ref_csv: Path, states2: Path, states6: Path, r
     fig_nsd_by_strategy(R, tracks, out / "nsd_by_strategy.png")
 
     # part 3: behaviour
-    basin = {b: tracks[b][0] for b in tracks}
-    basin_days = {}
-    for b, tr in basin.items():
-        s = pd.Series(tr.dc_km.to_numpy(), index=tr.epoch_day.to_numpy())
-        full = s.reindex(np.arange(s.index.min(), s.index.max() + 1))
-        full = full.ffill(limit=BASIN_FILL_DAYS).combine_first(full.bfill(limit=BASIN_FILL_DAYS))
-        basin_days[b] = full.index[(full <= BASIN_KM).to_numpy()].to_numpy()
+    sel_days = {b: {name: (area_days(tr.epoch_day.to_numpy(), tr[col].to_numpy()), months)
+                    for name, (col, months) in SELECTIONS.items()} for b, (tr, _) in tracks.items()}
+    del tracks
     st = {}
     for name, sdir, K in (("k2", states2, 2), ("k6", states6, 6)):
         S = pd.read_parquet(sdir / "states.parquet", columns=["bird", "row", state_col])
@@ -677,9 +829,9 @@ def run(gps: Path, windows: Path, ref_csv: Path, states2: Path, states6: Path, r
             raise ValueError(f"{sdir}: expected K={K}, found {int(S[state_col].max()) + 1}")
         st[name] = dict(tuple(S.groupby("bird", sort=False)))
         del S
-    wb = [b for b in wdirs if b in basin_days]
+    wb = [b for b in wdirs if b in sel_days]
     res = Parallel(n_jobs=workers)(
-        delayed(behaviour_bird)(wdirs[b], run_dir, st["k2"].pop(b, None), st["k6"].pop(b, None), basin_days[b],
+        delayed(behaviour_bird)(wdirs[b], run_dir, st["k2"].pop(b, None), st["k6"].pop(b, None), sel_days[b],
                                 state_col) for b in wb)
     del st
     P = {p["bird"]: p for p in res}
@@ -689,35 +841,26 @@ def run(gps: Path, windows: Path, ref_csv: Path, states2: Path, states6: Path, r
     B["track_days_windows"] = [(P[b]["last"] - P[b]["first"]).total_seconds() / 86400 for b in B.index]
     dep = pd.to_datetime(ref.loc[B.index, "deploy_on"], utc=True).dt.month
     B["deploy_month"] = dep.fillna(pd.Series({b: P[b]["first"].month for b in B.index})).to_numpy()
-    scal = [k for k in next(iter(P.values())) if not k.startswith("h_") and k not in ("bird", "first", "last")]
-    BB = pd.DataFrame([{k: P[b][k] for k in scal} | {"bird": b} for b in B.index]).set_index("bird")
+    BB = {}
+    for sel in SELECTIONS:
+        scal = [k for k in next(iter(P.values()))["sel"][sel] if not k.startswith("h_")]
+        BB[sel] = pd.DataFrame([{k: P[b]["sel"][sel][k] for k in scal} | {"bird": b} for b in B.index]).set_index("bird")
 
-    groupings = {}
-    for gname, col in (("rule", "strategy"), ("consensus", "consensus")):
-        for age in ("adult", "all"):
-            sub = B[(B.cohort == "2024") & B[col].isin(["migrant", "resident"])]
-            if age == "adult":
-                sub = sub[~sub.young]
-            groupings[f"{gname}|{age}"] = (sub[col] == "migrant").astype(int)
+    groupings = make_groupings(B)
     grp_rows, T = [], []
-    share_s = [c for c in BB if c.startswith("share_") and c.endswith("_sched")]
-    share_a = [c for c in BB if c.startswith("share_") and c.endswith("_all")]
-    kin = [c for c in BB if c.split("_")[0] in ("speed", "radius", "climb")]
-    for gk, lab in groupings.items():
-        X = BB.loc[lab.index]
-        n_s = X["n_k2_sched"]
-        grp_rows.append({"grouping": gk, "migrants": int(lab.sum()), "residents": int((1 - lab).sum()),
-                         "migrants_f/m/missing": "/".join(str(int(((B.loc[lab.index[lab == 1], "sex"].fillna("x")) == s).sum()))
-                                                          for s in ("f", "m", "x")),
-                         "residents_f/m/missing": "/".join(str(int(((B.loc[lab.index[lab == 0], "sex"].fillna("x")) == s).sum()))
-                                                           for s in ("f", "m", "x")),
-                         "birds_with_basin_windows": int((X["n_sel"] > 0).sum())})
-        sex = B.loc[lab.index, "sex"]
-        VS = X[share_s].where(n_s >= MIN_SHARE_WINDOWS, axis=0)
+    for gk, (sel, lab) in groupings.items():
+        X = BB[sel].loc[lab.index]
+        sex, coh = B.loc[lab.index, "sex"], B.loc[lab.index, "cohort"]
+        multi = coh.nunique() > 1
+        grp_rows.append(group_row(gk, sel, lab, X, sex, coh))
+        share_s = [c for c in X if c.startswith("share_") and c.endswith("_sched")]
+        share_a = [c for c in X if c.startswith("share_") and c.endswith("_all")]
+        kin = [c for c in X if c.split("_")[0] in ("speed", "radius", "climb")]
+        VS = X[share_s].where(X["n_k2_sched"] >= MIN_SHARE_WINDOWS, axis=0)
         VA = X[share_a].where(X["n_k2_all"] >= MIN_SHARE_WINDOWS, axis=0)
         for fam, V, tested in (("a_shares_scheduled", VS, True), ("a_shares_all_modes", VA, False),
                                ("b_kinematics", X[kin], True)):
-            rows_ = compare_table(V, lab, sex, fam, gk, n_perm, rng, tested)
+            rows_ = compare_table(V, lab, sex, fam, gk, n_perm, rng, tested, coh if multi else None)
             if tested:
                 ph = holm(np.array([r.get("p_perm", np.nan) for r in rows_]))
                 for r, p in zip(rows_, ph):
@@ -725,18 +868,21 @@ def run(gps: Path, windows: Path, ref_csv: Path, states2: Path, states6: Path, r
             T += rows_
     T = pd.DataFrame(T)
     groups = pd.DataFrame(grp_rows)
-    BB.join(B[["strategy", "consensus", "young", "sex", "cohort", "deploy_month", "track_days_windows"]]
-            ).reset_index().to_csv(out / "behaviour_birds.csv", index=False)
+    groups.to_csv(out / "behaviour_groups.csv", index=False)
+    info = B[["strategy", "strategy_coarse", "consensus", "young", "sex", "cohort", "deploy_month",
+              "track_days_windows", "cont_share"]]
+    pd.concat([BB[sel].drop(columns=["cont_share"], errors="ignore").join(info).assign(selection=sel)
+               for sel in SELECTIONS]).reset_index().to_csv(out / "behaviour_birds.csv", index=False)
     T.to_csv(out / "behaviour_tests.csv", index=False)
 
-    # (c) classifiers
+    # (c) classifiers (rule groupings)
     specs = {}
     rn = run_dir.name
-    for gk, lab in groupings.items():
-        if min(lab.sum(), (1 - lab).sum()) < MIN_GROUP_BIRDS:
+    for gk, (sel, lab) in groupings.items():
+        if "|rule|" not in gk or min(lab.sum(), (1 - lab).sum()) < MIN_GROUP_BIRDS:
             continue
         for tag, keys in (("flight", ["flight"]), ("ground", ["ground"]), ("flight_ground", ["flight", "ground"])):
-            H = pd.concat([h_frame(P, lab.index, k) for k in keys], axis=1)
+            H = pd.concat([h_frame(P, lab.index, k, sel) for k in keys], axis=1)
             ok = H.notna().all(axis=1)
             y = lab[ok]
             if min(y.sum(), (1 - y).sum()) < MIN_GROUP_BIRDS:
@@ -761,18 +907,101 @@ def run(gps: Path, windows: Path, ref_csv: Path, states2: Path, states6: Path, r
             "birds_gps": len(R), "birds_windows": len(P),
             "birds_without_deploy_on": int(ref.loc[R.index, "deploy_on"].isna().sum()),
             "thresholds": {k: globals()[k] for k in ("FIRST_DAYS", "FIT_DAYS", "MIN_DISP_KM", "MIGRANT_NORTH_KM",
-                                                     "RETURN_WITHIN_DAYS", "MIN_STAY_DAYS", "SETTLE_DAYS",
-                                                     "FINAL_DAYS", "ROLL_DAYS", "ROLL_MIN", "PHI_MIN", "PHI_MAX",
-                                                     "BASIN_KM", "BASIN_FILL_DAYS", "MIN_SHARE_WINDOWS",
-                                                     "MIN_STATE_WINDOWS", "MIN_GROUP_BIRDS")},
+                                                     "RETURN_NORTH_KM", "RETURN_WITHIN_DAYS", "FULL_YEAR_DAYS",
+                                                     "MIN_STAY_DAYS", "SETTLE_DAYS", "FINAL_DAYS", "ROLL_DAYS",
+                                                     "ROLL_MIN", "PHI_MIN", "PHI_MAX", "BASIN_KM", "BASIN_FILL_DAYS",
+                                                     "MIN_SHARE_WINDOWS", "MIN_STATE_WINDOWS", "MIN_GROUP_BIRDS")},
             "months": {"spring": SPRING_MONTHS, "summer": SUMMER_MONTHS, "winter": WINTER_MONTHS,
                        "compare": COMPARE_MONTHS},
-            "states6_names": STATES6, "flight6": FLIGHT6, "kappa": kappa, "runtime_s": None}
+            "selections": {k: [v[0], list(v[1])] for k, v in SELECTIONS.items()},
+            "variants": {k: list(v) for k, v in VARIANTS.items()}, "extra_variants": list(EXTRA_VARIANTS),
+            "coarse": COARSE, "states6_names": STATES6, "flight6": FLIGHT6, "kappa": kappa, "runtime_s": None}
     meta["runtime_s"] = round(time.time() - t0, 1)
     write_summary(out, R.assign(young=R.young.astype(bool)), agree, kappa, groups, T, clf, nest, meta)
     (out / "metadata.json").write_text(json.dumps(meta, indent=1, default=str))
     log(f"done ({meta['runtime_s']} s)")
     return meta
+
+
+def classify_all(files: list[Path], ref: pd.DataFrame, min_days: int, workers: int) -> tuple[dict, pd.DataFrame]:
+    """Part 1 for all GPS files: tracks {bird: (track, nsd fit)} and the per-bird class table (no positions)."""
+    G = Parallel(n_jobs=workers)(delayed(read_bird)(f, ref.at[f.stem, "deploy_on"]) for f in files)
+    G = [g for g in G if g["daily"] is not None and len(g["daily"])]
+    centre = tuple(np.median(np.array([g["median"] for g in G]), axis=0))
+    young = ref["tagged_young"].notna()
+    tracks, rows = {}, []
+    for g in G:
+        tr = track(g["daily"], centre)
+        c = classify_bird(tr, min_days, bool(young.get(g["bird"], False)))
+        tracks[g["bird"]] = (tr, c.pop("_fit"))
+        rows.append({"bird": g["bird"], "gps_first_year": int(tr.year.iat[0]), **c})
+    del G
+    R = pd.DataFrame(rows).set_index("bird")
+    R["young"] = young.reindex(R.index).fillna(False).astype(bool).to_numpy()
+    R["migrant_flag"] = ref.loc[R.index, "migrant"].notna().to_numpy()
+    R["sex"] = ref.loc[R.index, "sex"].to_numpy()
+    R["strategy"] = R["rule_class"]
+    R["strategy_nsd"] = R["nsd_class"]
+    R["strategy_coarse"] = R.strategy.map(coarse)
+    R["strategy_nsd_coarse"] = R.strategy_nsd.map(coarse)
+    R["consensus"] = np.where(R.strategy_coarse == R.strategy_nsd_coarse, R.strategy_coarse, "disagree")
+    return tracks, R
+
+
+def agreement(R: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
+    """Kappa between the coarse classes of both methods, and class counts per age group and 'migrant' flag."""
+    both = (R.strategy_coarse != "other") & (R.strategy_nsd_coarse != "other")
+    kappa = {"n": int(both.sum()),
+             "agree": float((R.strategy_coarse[both] == R.strategy_nsd_coarse[both]).mean()) if both.any() else np.nan,
+             "kappa": float(cohen_kappa_score(R.strategy_coarse[both], R.strategy_nsd_coarse[both]))
+             if both.sum() > 1 and R.strategy_coarse[both].nunique() + R.strategy_nsd_coarse[both].nunique() > 2
+             else np.nan}
+    ag = []
+    for meth, col in (("rule", "strategy"), ("rule_coarse", "strategy_coarse"), ("nsd", "strategy_nsd"),
+                      ("nsd_coarse", "strategy_nsd_coarse"), ("consensus", "consensus")):
+        for age, sub in (("other", R[~R.young]), ("young", R[R.young])):
+            for flag, s in (("flagged migrant", sub[sub.migrant_flag]), ("not flagged", sub[~sub.migrant_flag])):
+                ag.append({"method": meth, "age": age, "flag": flag, "birds": len(s), **s[col].value_counts().to_dict()})
+    agree = pd.DataFrame(ag).fillna(0)
+    cls = [c for c in agree if c not in ("method", "age", "flag", "birds")]
+    agree[cls] = agree[cls].astype(int)
+    agree = agree[agree.birds > 0]
+    return kappa, agree
+
+
+def make_groupings(B: pd.DataFrame) -> dict:
+    """'<variant>|<method>|<age>' -> (selection, 0/1 labels: 1 = coarse migrant, 0 = coarse resident)."""
+    out = {}
+    for variant, (sel, cohort) in VARIANTS.items():
+        for method, col in (("rule", "strategy_coarse"), ("consensus", "consensus")):
+            for age in ("adult", "all"):
+                sub = B[B[col].isin(["migrant", "resident"])]
+                if cohort is not None:
+                    sub = sub[sub.cohort == cohort]
+                if age == "adult":
+                    sub = sub[~sub.young]
+                out[f"{variant}|{method}|{age}"] = (sel, (sub[col] == "migrant").astype(int))
+    return out
+
+
+def group_row(gk: str, sel: str, lab: pd.Series, X: pd.DataFrame, sex: pd.Series, coh: pd.Series) -> dict:
+    """Bird counts of one grouping: per group, with selected windows, with enough scheduled windows, by sex."""
+    row = {"grouping": gk, "selection": sel}
+    for g, v in (("migrants", 1), ("residents", 0)):
+        ix = lab.index[lab == v]
+        row[g] = len(ix)
+        row[f"{g}_with_windows"] = int((X.loc[ix, "n_sel"] > 0).sum())
+        dd = X.loc[ix, "n_sel_days"][X.loc[ix, "n_sel"] > 0]
+        row[f"{g}_median_days"] = float(dd.median()) if len(dd) else np.nan
+        M = X.loc[ix][X.loc[ix, "n_sel"] > 0][[f"n_sel_month{mo:02d}" for mo in range(1, 13)]].to_numpy(float)
+        mix = (M / M.sum(1, keepdims=True)).mean(0) if len(M) else np.zeros(12)
+        row[f"{g}_month_mix"] = " ".join(f"{MONTH_ABBR[i]} {mix[i]:.2f}" for i in range(12) if mix[i] >= 0.005)
+        row[f"{g}_with_{MIN_SHARE_WINDOWS}_sched"] = int((X.loc[ix, "n_k2_sched"] >= MIN_SHARE_WINDOWS).sum())
+        row[f"{g}_f/m/missing"] = "/".join(str(int((sex[ix].fillna("x") == s).sum())) for s in ("f", "m", "x"))
+    have = X["n_sel"] > 0
+    row["cohorts_with_both_groups"] = ",".join(sorted(str(c) for c in coh[have].unique()
+                                                      if 0 < lab[have][coh[have] == c].sum() < (coh[have] == c).sum()))
+    return row
 
 
 def main(argv=None) -> None:

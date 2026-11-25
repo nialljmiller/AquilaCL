@@ -202,6 +202,8 @@ def resolve_format(cfg) -> None:
             if not fmt_path.exists():
                 raise SystemExit(f"{fmt_path} missing: pass --{key.replace('_', '-')} explicitly (0 = off)")
             v = json.loads(fmt_path.read_text())[key]
+            if v is None:
+                raise SystemExit(f"{fmt_path} has no {key} (no reliable calibration for one setting): pass it explicitly")
         setattr(cfg, key, float(v))
 
 

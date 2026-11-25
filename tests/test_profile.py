@@ -74,9 +74,9 @@ def test_sensitivity_per_burst_type(tmp_path):
     off = cal[["offset_x", "offset_y", "offset_z"]].to_numpy(float)
     k = cal.index.get_level_values("sensitivity_k").to_numpy()
     step = (1 / gain[k == 0]).max()
-    clip = (np.minimum(off, 4095 - off) / gain)[k == 1].min() - 0.01
+    clip = (np.minimum(off, 4095 - off) / gain)[k == 1].min() - 0.05
     np.testing.assert_allclose([fmt["step_g"], fmt["clip_g"]], [step, clip], rtol=1e-12)
-    np.testing.assert_allclose([fmt["step_g"], fmt["clip_g"]], [1 / 512, OFFSET.min() / 1024 - 0.01], rtol=0.02)
+    np.testing.assert_allclose([fmt["step_g"], fmt["clip_g"]], [1 / 512, OFFSET.min() / 1024 - 0.05], rtol=0.02)
     assert len(fmt["step_g_periods"]) == 2 and len(fmt["clip_g_periods"]) == 2
 
 
@@ -125,3 +125,17 @@ def test_profile_bird_end_to_end(tmp_path):
     assert np.allclose(day["dom_freq_hz"], 2.5, atol=0.1)
     assert (out.loc[out["still"], "sun_elev_deg"] < -6).all()
     assert {r["stream"] for r in sched} == {"gps", "acceleration"}
+
+
+def test_unreliable_fit_is_replaced_by_scaled_donor():
+    rng = np.random.default_rng(1)
+    u = rng.normal(size=(200, 3))
+    u /= np.linalg.norm(u, axis=1, keepdims=True)
+    good = 2048 + 512 * u[:100]  # k=0: clean still bursts in many postures
+    bad = 2048 + 1024 * u[100:] * rng.uniform(0.6, 1.4, (100, 1))  # k=1: 60 "still" bursts, norms all over
+    means = np.r_[good, bad]
+    k = np.r_[np.zeros(100, int), np.ones(100, int)]
+    cals = acc.calibrate_tag(means, np.ones(200, bool), k)
+    assert not acc.calibration_flags(cals[0])
+    assert cals[1].model == "scaled_from_k0"
+    np.testing.assert_allclose(cals[1].gain, 2 * cals[0].gain)

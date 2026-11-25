@@ -278,7 +278,7 @@ def profile_bird(
     return sched, cal_rows
 
 
-def common_format(cal: pd.DataFrame, clip_margin_g: float = 0.01) -> dict:
+def common_format(cal: pd.DataFrame, clip_margin_g: float = 0.05) -> dict:
     """Common acceleration format that hides the sensitivity setting, from the reliable calibrations.
 
     ``step_g``: the coarsest calibrated step among k=0 periods, max over periods and axes of 1/gain.

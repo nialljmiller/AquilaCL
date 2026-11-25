@@ -1,6 +1,6 @@
 #!/bin/bash
 # Stage 4: SimCLR training on one H200, deterministic embedding of all windows, evaluation.
-# Usage: RUN=<name> sbatch slurm/04_train.sh [extra train.py options]
+# Usage: RUN=<name> DATA=<data dir> WINDOWS=<windows dir> sbatch slurm/04_train.sh [extra train.py options]
 # Resubmitting with the same RUN resumes from its latest checkpoint.
 #SBATCH --account=ai4wy-eap
 #SBATCH --partition=gp-1
@@ -14,8 +14,7 @@ set -euo pipefail
 source "$HOME/opt/miniforge3/etc/profile.d/conda.sh"; conda activate aquilacl
 ROOT=/project/ai4wy-eap/nmille39/aquilacl
 : "${RUN:?set RUN to a run name}"
-DATA=${DATA:-$ROOT/data}
-WINDOWS=${WINDOWS:-$DATA/windows_10s}
+: "${DATA:?set DATA (holds events/)}"; : "${WINDOWS:?set WINDOWS}"
 nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv
 echo "== train $RUN $(date)"
 python -m aquilacl.train --windows "$WINDOWS" --run "$ROOT/runs/$RUN" "$@"

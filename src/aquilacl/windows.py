@@ -50,7 +50,7 @@ def place_bursts(start_idx: np.ndarray, n_samp: np.ndarray, seg: np.ndarray, sna
     """Sample index of each burst within its segment, never overwriting earlier samples.
 
     ``start_idx`` is the burst start rounded to the sample grid from the segment start. A burst starting within
-    ``snap`` slots of the previous burst's placed end starts exactly at that end (continuous recording, no holes);
+    ``snap`` slots of the previous burst's placed end starts exactly at that end (continuous recording; larger timing differences stay as real gaps);
     otherwise it is placed by time. Samples that would land on already placed samples are dropped from the head
     of the later burst. Returns (placed start, leading samples dropped, snapped flag), all per burst.
     """
@@ -139,7 +139,8 @@ def build_bird(
     keep = acc_mask.sum(axis=1) >= int(min_acc_s * FS)
 
     # GPS: per-second slots inside each window
-    fixes = pq.read_table(profile / "gps" / f"{bird}.parquet").to_pandas()
+    gps_file = profile / "gps" / f"{bird}.parquet"  # absent when a bird has no good fixes
+    fixes = pq.read_table(gps_file).to_pandas() if gps_file.exists() else pd.DataFrame()
     gps_arr = np.zeros((n_win, int(window_s), len(GPS_CHANNELS)), dtype=np.float32)
     gps_mask = np.zeros_like(gps_arr, dtype=bool)
     if len(fixes):

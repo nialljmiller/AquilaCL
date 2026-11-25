@@ -118,6 +118,8 @@ def load(windows: Path, birds: list[str] | None = None, step_g: float = 0.0, cli
     scale = np.array([GPS_SCALE[c] for c in GPS_CHANNELS], dtype=np.float32)
     for d in dirs:
         m = pd.read_parquet(d / "meta.parquet")
+        if len(m) == 0:
+            continue  # bird without kept windows
         f = pd.read_parquet(d / "features.parquet")
         acc = np.load(d / "acc.npy")
         am = np.load(d / "acc_mask.npy")

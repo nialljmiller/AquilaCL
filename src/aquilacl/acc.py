@@ -170,6 +170,7 @@ def calibrate_tag(
     A setting with fewer is derived from the same tag's reliable setting with the most still
     bursts: same offset, gain scaled by 2**(k - k_donor), model "scaled_from_k<donor>". Without a
     reliable donor it gets the fixed-offset fit of its few bursts (flagged "few_still").
+    A fitted setting that is flagged unreliable is also replaced by the scaled donor when one exists.
     """
     means, still, k = np.asarray(means, float), np.asarray(still, bool), np.asarray(k)
     cals: dict[int, Calibration] = {}
@@ -180,7 +181,7 @@ def calibrate_tag(
     donors = [d for d, c in cals.items() if not calibration_flags(c, min_static)]
     for kk in np.unique(k):
         kk = int(kk)
-        if kk in cals:
+        if kk in cals and (kk in donors or not donors):
             continue
         m = means[still & (k == kk)]
         if donors:

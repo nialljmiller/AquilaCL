@@ -14,8 +14,8 @@
    Reference: how often the state stays the same between consecutive windows of one segment.
    A probe can always read recording length from the mask; what matters is whether states change.
    Once a run uses the common format, the two sensitivity swaps are identical by construction (score 1.0);
-   for such runs the evidence is the near-switch probe in (5).
-5. Nuisance probes next to the same probes on handcrafted features: sensitivity setting near switches
+   for such runs the evidence is the full-window probe in (5).
+5. Nuisance probes next to the same probes on handcrafted features: sensitivity setting on full windows
    (birds with both settings) and bird identity on held-out birds (later half of each record).
 
 Usage: python -m aquilacl.evaluate --run <run dir> --windows <windows dir> --events <data>/events
@@ -45,6 +45,8 @@ WINDOW_NUISANCE = ["sensitivity_k", "decoding", "short_acc"]
 def load_run(run: Path, windows: Path) -> tuple[pd.DataFrame, np.ndarray]:
     metas, H = [], []
     for d in sorted(p for p in windows.iterdir() if p.is_dir()):
+        if len(pd.read_parquet(d / "meta.parquet", columns=["bird"])) == 0:
+            continue  # bird without kept windows (e.g. all calibrations unreliable): never embedded
         e = np.load(run / "embeddings" / f"{d.name}.npz")
         m = pd.concat([pd.read_parquet(d / "meta.parquet"), pd.read_parquet(d / "features.parquet")], axis=1)
         if len(m) != len(e["h"]):
@@ -229,11 +231,10 @@ def _feature_matrix(meta):
     return np.c_[X, ~np.isfinite(meta["speed_mean"].to_numpy(float)) if "speed_mean" in meta else miss.any(1)]  # + "no GPS"
 
 
-def nuisance_vs_features(meta, H, hold, rng, days=14, per_class=1500) -> dict:
+def nuisance_vs_features(meta, H, hold, rng, per_class=1500) -> dict:
     """Nuisance probes on h next to the same probes on handcrafted features (the level behaviour alone explains).
 
-    sensitivity_near_switch: birds that use both settings, windows within ``days`` of a switch, grouped
-    5-fold by bird. bird_id_holdout: held-out birds, fit on the first half of each bird's time span, test on
+    sensitivity_full_windows: full windows of birds that use both settings, grouped by bird. bird_id_holdout: held-out birds, fit on the first half of each bird's time span, test on
     the second half. A value on h well above the feature value means the representation carries the nuisance
     beyond behaviour.
     """
@@ -241,33 +242,30 @@ def nuisance_vs_features(meta, H, hold, rng, days=14, per_class=1500) -> dict:
 
     feats = _feature_matrix(meta)
     out = {}
-    # sensitivity setting near switches
+    # sensitivity setting: full windows only (the setting follows burst type, which also sets window fullness),
+    # birds that use both settings, grouped cross-validation by bird
+    full = meta["acc_samples"].to_numpy() >= 190
     rows = []
-    for b, idx in meta.groupby("bird").indices.items():
-        d = meta.iloc[idx].sort_values("t_start")
-        k = d["sensitivity_k"].to_numpy()
-        if len(np.unique(k)) < 2:
+    for b, idx in meta[full].groupby("bird").indices.items():
+        ii = np.flatnonzero(full)[idx]
+        kk = meta["sensitivity_k"].to_numpy()[ii]
+        if len(np.unique(kk)) < 2:
             continue
-        t = d["t_start"].to_numpy()
-        sw = t[1:][k[1:] != k[:-1]]
-        j = np.clip(np.searchsorted(sw, t), 1, len(sw)) if len(sw) > 1 else np.zeros(len(t), int)
-        dist = np.minimum(np.abs(t - sw[j - 1 if len(sw) > 1 else 0]), np.abs(t - sw[np.minimum(j, len(sw) - 1)]))
-        near = d.index.to_numpy()[dist <= np.timedelta64(days, "D")]
-        for c in np.unique(meta.loc[near, "sensitivity_k"]):
-            r = near[meta.loc[near, "sensitivity_k"].to_numpy() == c]
+        for c in np.unique(kk):
+            r = ii[kk == c]
             rows.append(rng.choice(r, min(per_class, len(r)), replace=False))
-    if rows:
+    n_birds = len({meta["bird"].iat[r[0]] for r in rows})
+    if n_birds >= 2:
         r = np.concatenate(rows)
         y = meta["sensitivity_k"].to_numpy()[r]
         g = meta["bird"].to_numpy()[r]
         for name, X in (("h", H[r]), ("features", feats[r])):
             pred = np.empty(len(r), dtype=y.dtype)
-            for tr, te in GroupKFold(5).split(X, y, g):
+            for tr, te in GroupKFold(min(5, n_birds)).split(X, y, g):
                 mdl = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000, class_weight="balanced")).fit(X[tr], y[tr])
                 pred[te] = mdl.predict(X[te])
-            out[f"sensitivity_near_switch_{name}"] = float(balanced_accuracy_score(y, pred))
-        out["sensitivity_near_switch_birds"] = int(len(np.unique(g)))
-        out["sensitivity_near_switch_n"] = int(len(r))
+            out[f"sensitivity_full_windows_{name}"] = float(balanced_accuracy_score(y, pred))
+    out["sensitivity_full_windows_birds"] = int(n_birds)
     # bird identity among held-out birds, later half of each bird's record
     tr, te = [], []
     for b in hold:

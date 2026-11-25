@@ -1,9 +1,11 @@
 #!/bin/bash
-# Movement strategy per bird from the raw GPS tracks (rule classes, primary, and NSD models; distances only, no
-# coordinates written), then coarse migrants vs residents in four variants (cohort 2024 Nov-Mar basin days; all
-# cohorts Nov-Mar basin days; all cohorts all-month basin days; extra: all cohorts on each bird's own winter range;
-# cohort as permutation stratum): scheduled-window state shares, flight kinematics, and a grouped-CV classifier on
-# mean h with bird-label permutation nulls (CPU only).
+# Movement strategy per bird from the raw GPS tracks (rule classes, primary, and NSD models; tracks cut at deploy-off
+# and before a stationary end; gap-aware migration dates; threshold sensitivity at 750/1000/1250 km from both
+# origins; per-bird distances rounded to 50 km, no northing, no coordinates written), then coarse migrants vs
+# residents (resident_full primary, present_partial_year as sensitivity) in four variants with cohort = deployment
+# year. The nuisance floor of every grouping is fitted first; groupings with floor AUC >= 0.9 are "not testable in
+# this design" (no p-values). Tested where testable: K=2 flight share of scheduled first-of-burst daylight windows,
+# flight kinematics, grouped-CV classifier on mean h with bird-label permutation nulls (CPU only).
 # Reads GPS, WINDOWS, REFERENCE, STATES2, STATES6, RUN; writes only into OUT, which must be new or empty.
 #SBATCH --account=ai4wy-eap
 #SBATCH --partition=gp-1

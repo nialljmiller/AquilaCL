@@ -78,6 +78,52 @@ def test_split_bins_and_solar_day_across_utc_midnight():
     assert len(set(b)) == 1
 
 
+# ---------------------------------------------------------------- solar-hour stratified daily budgets
+
+def _H(days, hours, flight_share, cover=3600.0):
+    """Hourly table (index = absolute local hour bin) with K=2 seconds; flight_share: hour -> share."""
+    rows = [(d * 24 + h, cover * flight_share.get(h, 0.0), cover * (1 - flight_share.get(h, 0.0)))
+            for d in days for h in hours]
+    H = pd.DataFrame(rows, columns=["hb", "k2_flight", "k2_ground"]).set_index("hb")
+    return H.assign(n_sched=12)
+
+
+JULY = 19905  # 2024-07-01 as days since 1970-01-01
+CATS = {"k2": ["k2_flight", "k2_ground"]}
+
+
+def test_stratified_vs_scaled_with_night_off_window():
+    day_hours = range(5, 20)  # tag records 05-20 local solar only
+    Ha = _H([JULY, JULY + 1], day_hours, {h: 0.5 for h in (10, 11, 12, 13)})
+    night = [_H([JULY, JULY + 1], range(24), {}) for _ in range(3)]  # birds that record at night: all ground
+    pop = bu.population_cells([Ha] + night, CATS)
+    S = bu.stratify(Ha, CATS, pop)
+    assert np.allclose(S.d_k2_flight, 2.0) and np.allclose(S.d_k2_flight + S.d_k2_ground, 24)
+    assert (S.n_direct == 15).all() and (S.h_fill_population == 9).all() and (S.h_unfilled == 0).all()
+    assert np.allclose(S.d_flight_from_population, 0.0)
+    scaled = 24 * Ha.k2_flight.sum() / (Ha.k2_flight.sum() + Ha.k2_ground.sum())
+    assert scaled == pytest.approx(2.0 * 24 / 15)  # the first estimator inflates flight by 24 / covered hours
+    own = bu.stratify(Ha, CATS, None)  # own data only: the night cannot be filled
+    assert (own.h_unfilled == 9).all() and own.d_k2_flight.isna().all()
+    # fewer than POP_MIN_BIRDS night recorders: no population cell for the night
+    assert bu.stratify(Ha, CATS, bu.population_cells([Ha] + night[:2], CATS)).h_unfilled.eq(9).all()
+
+
+def test_fill_order_bird_month_then_bird_then_unqualified():
+    fs = {12: 0.5}
+    H = pd.concat([_H([JULY, JULY + 1], range(24), fs),
+                   _H([JULY + 2], [h for h in range(24) if h != 12], fs),        # July, hour 12 missing -> bird-month
+                   _H([JULY + 31], [h for h in range(24) if h != 12], fs),       # August, no August hour 12 -> bird
+                   _H([JULY + 32], range(24), fs, cover=300.0)])                  # all bins below MIN_BIN_S -> filled
+    S = bu.stratify(H, CATS, None).set_index("dayn")
+    assert S.loc[JULY + 2, "h_fill_bird_month"] == 1 and S.loc[JULY + 2, "h_fill_bird"] == 0
+    assert S.loc[JULY + 31, "h_fill_bird"] == 1 and S.loc[JULY + 31, "h_fill_bird_month"] == 0
+    assert np.allclose(S.d_k2_flight, 0.5)
+    assert S.loc[JULY + 32, "n_direct"] == 0 and S.loc[JULY + 32, "direct_mask"] == "-" * 24
+    D = S.reset_index().assign(d_flight=S.d_k2_flight.to_numpy())
+    assert bu.qualifies(D, 12, "population").tolist() == [True, True, True, True, False]
+
+
 # ---------------------------------------------------------------- tests between birds
 
 def test_month_combined_test_null_and_planted():
@@ -99,13 +145,15 @@ def test_month_combined_test_null_and_planted():
 
 # ---------------------------------------------------------------- end to end on synthetic data
 
-def _write_bird(root, name, rng, flight_bias, days=7):
+def _write_bird(root, name, rng, flight_bias, days=7, night_off=False):
     t0 = pd.Timestamp("2024-08-01 07:00", tz="UTC")  # local solar midnight at a -7 h offset
     bouts = [(d * 86400 + h * 3600 + 120, 600) for d in range(days) for h in (18, 21)]  # 11:00 and 14:00 local
     rows = []
     for seg, (s, n) in enumerate(bouts):
         rows += [(s + 10 * j, 1, 200, 10_000 + seg, j) for j in range(n // 10)]
     for i, t in enumerate(np.arange(0, days * 86400, 300.0)):
+        if night_off and not 5 <= (t / 3600) % 24 < 20:  # tag records 05-20 local only
+            continue
         if not any(s <= t < s + n for s, n in bouts):  # schedule suppressed during bouts
             rows.append((t, 0, 40, i, 0))
     rows.sort()
@@ -137,7 +185,7 @@ def synthetic_run(tmp_path_factory):
     root = tmp_path_factory.mktemp("bud")
     rng = np.random.default_rng(1)
     names = [f"bird{i}" for i in range(8)]
-    parts = [_write_bird(root, b, rng, 0.2 + 0.3 * (i % 2)) for i, b in enumerate(names)]
+    parts = [_write_bird(root, b, rng, 0.2 + 0.3 * (i % 2), night_off=i % 4 in (1, 2)) for i, b in enumerate(names)]
     for j, d in enumerate(("s2", "s6", "sub")):
         (root / d).mkdir()
         pd.concat([p[j] for p in parts]).to_parquet(root / d / ("substates.parquet" if d == "sub" else "states.parquet"))
@@ -157,16 +205,31 @@ def test_end_to_end_outputs(synthetic_run):
     assert chk["share_slots_found_pooled"] < 0.2 and chk["headline_variant"] == "imputed" and chk["birds_imputed"] == 8
     assert chk["share_slot_windows_flight"] == 1.0
     D = pd.read_csv(out / "birddays.csv")
-    full = D[D.coverage > 0.9]
-    assert len(full) and np.allclose(full.d_flight + full.d_ground, 24)
+    Q = D[D.qualifies]
+    assert len(Q) and np.allclose(Q.d_flight + Q.d_ground, 24)
+    full = Q[Q.coverage > 0.9]
     # every bout adds 600 s of imputed flight: 2 bouts per day
-    assert np.allclose(full.h_k2_flight_imputed, 2 * 600 / 3600, atol=0.05)
+    assert len(full) and np.allclose(full.h_k2_flight_imputed, 2 * 600 / 3600, atol=0.05)
+    # full-day recorders: stratified = scaled; night-off birds: night filled from the population (no flight there),
+    # and the first estimator inflates flight (about 24 / 15 covered hours; the 21:00 bout lies in the night)
+    assert np.allclose(full.d_flight, full.d_flight_scaled_24h, rtol=0.02)
+    off = Q[Q.bird.isin(["bird1", "bird2", "bird5", "bird6"])]
+    assert len(off) and (off.h_fill_population == 9).all() and np.allclose(off.d_flight_from_population, 0)
+    assert np.allclose(off.d_flight_scaled_24h / off.d_flight, 24 / 15, rtol=0.03)
     W = pd.read_csv(out / "window_vs_time.csv").set_index(["system", "state"])
     assert W.loc[("k2", "flight"), "window_share_all"] > W.loc[("k2", "flight_total"), "time_share"]
     tests = pd.read_csv(out / "tests.csv")
     main = tests[tests.main & (tests.test == "sex")].iloc[0]
     assert main.months_used == 1 and main.n_birds_1 == 4 and np.isfinite(main.p_perm)
-    assert sorted(pd.read_csv(out / "coverage_sensitivity.csv").min_coverage.unique()) == [0.3, 0.5, 0.7]
+    sens = pd.read_csv(out / "coverage_sensitivity.csv")
+    rules = set(zip(sens.min_direct_bins, sens.fill))
+    assert rules == {(12, "population"), (8, "population"), (14, "population"), (12, "own")}
+    m0 = sens[sens.month == 0].set_index(["min_direct_bins", "fill"])
+    assert m0.loc[(12, "own"), "n_birds"] == 4  # night-off birds need the population fill
+    cmp24 = pd.read_csv(out / "scaled_24h_comparison.csv")
+    assert set(cmp24.estimator) == {"scaled_24h", "stratified"}
+    meta = json.loads((out / "metadata.json").read_text())
+    assert meta["diel_check"]["diel_hours_with_data"] == 24
 
 
 def test_outputs_hold_no_positions_or_utc_times(synthetic_run):

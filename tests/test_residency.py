@@ -417,3 +417,12 @@ def test_end_to_end_without_h_classifier(tmp_path, monkeypatch):
     clf = pd.read_csv(out / "classifiers.csv")
     assert clf.run.str.endswith(":floor").all() and (out / "nested.csv").read_text().strip() == ""
     assert "not run: no rule grouping has >= 50 birds per class" in (out / "residency_summary.md").read_text()
+
+
+def test_strata_codes_empty_selection():
+    """An empty selection (no bird left in a grouping) gives no codes and no informative strata."""
+    from aquilacl import residency as rs
+
+    e = pd.Series([], dtype=object)
+    assert len(rs._strata_codes(e)) == 0 and len(rs._strata_codes(e, e)) == 0
+    assert rs.informative_strata(np.array([], int), rs._strata_codes(e)) == (0, 0)

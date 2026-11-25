@@ -609,6 +609,8 @@ def holm(p: np.ndarray, m: int | None = None) -> np.ndarray:
 
 
 def _strata_codes(*cols: pd.Series) -> np.ndarray:
+    if not cols or len(cols[0]) == 0:  # empty selection: pandas' row-wise agg would return one row
+        return np.zeros(len(cols[0]) if cols else 0, int)
     key = pd.concat([c.astype(object).fillna("missing").astype(str) for c in cols], axis=1).agg("|".join, axis=1)
     return pd.Categorical(key).codes
 

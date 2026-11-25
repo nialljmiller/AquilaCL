@@ -57,6 +57,22 @@ def roost_gravity(acc: np.ndarray, mask: np.ndarray, sun: np.ndarray, vedba: np.
     return np.median(u, axis=0), int(sel.sum())
 
 
+def common_format(acc: np.ndarray, mask: np.ndarray, step_g: float, clip_g: float) -> np.ndarray:
+    """Put acceleration (sensor frame, g) on one grid and one range, whatever the tag's sensitivity setting.
+
+    Tags record at 512 or 1024 counts per g. After calibration both are in g, but the 1024 setting has half
+    the step (about 0.001 g against 0.002 g) and clips at about +-2.1 g instead of +-4 g; a probe reads the
+    setting from the step alone with balanced accuracy 0.995. Rounding to the coarser step and clipping to the
+    narrower range, per sensor axis and before any rotation, removes both. 0 disables either part.
+    """
+    a = acc.astype(np.float32)
+    if step_g > 0:
+        a = np.round(a / step_g) * step_g
+    if clip_g > 0:
+        a = np.clip(a, -clip_g, clip_g)
+    return (a * mask[:, :, None]).astype(np.float16)
+
+
 def holdout_birds(birds: list[str], cohort: dict[str, str], per_cohort: int = 6, salt: str = "aquilacl") -> list[str]:
     """Deterministic held-out birds: the ``per_cohort`` lowest hashes within each cohort."""
     out = []
@@ -76,7 +92,10 @@ class WindowData:
     orientation: pd.DataFrame  # per bird: roost direction, windows used, tilt corrected
 
 
-def load(windows: Path, birds: list[str] | None = None) -> WindowData:
+def load(windows: Path, birds: list[str] | None = None, step_g: float = 0.0, clip_g: float = 0.0,
+         rotate: bool = True) -> WindowData:
+    """Load windows; ``step_g``/``clip_g`` apply :func:`common_format`; ``rotate=False`` keeps the sensor frame
+    (the per-bird rotation is still estimated and returned in ``orientation``)."""
     dirs = sorted(p for p in windows.iterdir() if p.is_dir())
     if birds is not None:
         dirs = [d for d in dirs if d.name in set(birds)]
@@ -88,13 +107,13 @@ def load(windows: Path, birds: list[str] | None = None) -> WindowData:
         acc = np.load(d / "acc.npy")
         am = np.load(d / "acc_mask.npy")
         v, n_used = roost_gravity(acc, am, m["sun_elev_deg"].to_numpy(), f["vedba"].to_numpy())
-        if v is not None:
-            R = rotation_to_z(v).astype(np.float32)
+        if step_g > 0 or clip_g > 0:
+            acc = common_format(acc, am, step_g, clip_g)
+        R = rotation_to_z(v).astype(np.float32) if v is not None else np.eye(3, dtype=np.float32)
+        if v is not None and rotate:
             acc = (acc.astype(np.float32) @ R.T).astype(np.float16) * am[:, :, None]
-            tilt = float(np.degrees(np.arccos(np.clip(v[2] / np.linalg.norm(v), -1, 1))))
-        else:
-            tilt = float("nan")
-        orient.append({"bird": d.name, "roost_windows": n_used, "tilt_corrected_deg": tilt})
+        tilt = float(np.degrees(np.arccos(np.clip(v[2] / np.linalg.norm(v), -1, 1)))) if v is not None else float("nan")
+        orient.append({"bird": d.name, "roost_windows": n_used, "tilt_corrected_deg": tilt, "R": R.ravel().tolist()})
         g = np.load(d / "gps.npy") / scale
         g[:, :, GPS_CHANNELS.index("eobs:horizontal-accuracy-estimate")] = np.log1p(
             np.load(d / "gps.npy")[:, :, GPS_CHANNELS.index("eobs:horizontal-accuracy-estimate")]

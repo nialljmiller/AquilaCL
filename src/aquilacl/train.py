@@ -50,10 +50,34 @@ def contiguous_crop(mask: torch.Tensor, min_len: int, p: float) -> torch.Tensor:
     return torch.where(do[:, None], mask & keep, mask)
 
 
+def burst_crop(acc: torch.Tensor, mask: torch.Tensor, lengths: tuple[int, ...], p: float):
+    """With probability p turn a window into what a short recording bout looks like.
+
+    Short bouts are single 40- or 64-sample bursts that always sit at the start of their window, while
+    continuous segments fill all 200 slots; a probe tells them apart at 0.998. Cutting one view of a long
+    window to a burst length and moving it to the window start teaches the encoder that both describe the
+    same behaviour, so states are not split by recording schedule.
+    """
+    B, T = mask.shape
+    dev = mask.device
+    n = mask.sum(1)
+    L = torch.tensor(lengths, device=dev)[torch.randint(len(lengths), (B,), device=dev)]
+    do = (torch.rand(B, device=dev) < p) & (n > L)
+    first = torch.where(mask.any(1), mask.float().argmax(1), torch.zeros_like(n))
+    start = first + (torch.rand(B, device=dev) * (n - L).clamp(min=0)).long()
+    start = torch.where(do, start, torch.zeros_like(start))
+    t = torch.arange(T, device=dev)[None]
+    src = (start[:, None] + t).clamp(max=T - 1)
+    shifted_m = mask.gather(1, src) & (t < L[:, None])
+    shifted_a = acc.gather(1, src[..., None].expand(-1, -1, acc.shape[-1]))
+    return torch.where(do[:, None, None], shifted_a, acc), torch.where(do[:, None], shifted_m, mask)
+
+
 def augment(acc, amask, gps, gmask, cfg) -> tuple:
     B = acc.shape[0]
     dev = acc.device
     amask = contiguous_crop(amask, cfg.min_acc_samples, cfg.p_crop)
+    acc, amask = burst_crop(acc, amask, tuple(cfg.burst_lengths), cfg.p_burst_crop)
     R = random_rotation(B, cfg.rot_deg, dev)
     scale = torch.empty(B, 1, 1, device=dev).uniform_(1 - cfg.scale, 1 + cfg.scale)
     acc = (acc.float() @ R.transpose(1, 2)) * scale + cfg.noise_g * torch.randn_like(acc, dtype=torch.float32)
@@ -112,6 +136,10 @@ def get_args(argv=None):
     ap.add_argument("--neg-mask-windows", type=int, default=3, help="same bird+segment within this many windows are not negatives")
     ap.add_argument("--min-acc-samples", type=int, default=24)
     ap.add_argument("--p-crop", type=float, default=0.8)
+    ap.add_argument("--p-burst-crop", type=float, default=0.0, help="probability a view is cut to a short-burst length")
+    ap.add_argument("--burst-lengths", type=int, nargs="+", default=[40, 64], help="lengths of real short bouts")
+    ap.add_argument("--step-g", type=float, default=0.0, help="common acceleration step in g (0 = off), see dataset.common_format")
+    ap.add_argument("--clip-g", type=float, default=0.0, help="common acceleration range +-g (0 = off)")
     ap.add_argument("--rot-deg", type=float, default=15.0)
     ap.add_argument("--scale", type=float, default=0.1)
     ap.add_argument("--noise-g", type=float, default=0.01)
@@ -135,24 +163,29 @@ def lr_at(step, cfg):
 
 
 @torch.no_grad()
-def embed(model, data, dev, out: Path, batch: int = 8192):
+def encode(model, acc, amask, gps, gmask, dev, batch: int = 8192):
+    """Deterministic h and z for prepared numpy arrays (no augmentation)."""
     model.eval()
-    out.mkdir(parents=True, exist_ok=True)
     H, Z = [], []
-    for s in range(0, len(data.meta), batch):
+    for s in range(0, len(acc), batch):
         sl = slice(s, s + batch)
-        a = torch.from_numpy(data.acc[sl]).to(dev).float()
-        am = torch.from_numpy(data.acc_mask[sl]).to(dev)
-        g = torch.from_numpy(data.gps[sl]).to(dev).float()
-        gm = torch.from_numpy(data.gps_mask[sl]).to(dev)
+        am = torch.as_tensor(np.asarray(amask[sl])).to(dev)
+        a = torch.as_tensor(np.asarray(acc[sl])).to(dev).float()
+        g = torch.as_tensor(np.asarray(gps[sl])).to(dev).float()
+        gm = torch.as_tensor(np.asarray(gmask[sl])).to(dev)
         with torch.autocast(dev.split(":")[0], dtype=torch.bfloat16, enabled=dev.startswith("cuda")):
             h, z = model(a, am, g, gm)
         H.append(h.float().cpu().numpy())
         Z.append(z.float().cpu().numpy())
-    H, Z = np.concatenate(H), np.concatenate(Z)
+    model.train()
+    return np.concatenate(H), np.concatenate(Z)
+
+
+def embed(model, data, dev, out: Path):
+    out.mkdir(parents=True, exist_ok=True)
+    H, Z = encode(model, data.acc, data.acc_mask, data.gps, data.gps_mask, dev)
     for b, idx in data.meta.groupby("bird").indices.items():
         np.savez(out / f"{b}.npz", h=H[idx].astype(np.float16), z=Z[idx].astype(np.float16), row=idx)
-    model.train()
 
 
 def main(argv=None):
@@ -163,8 +196,8 @@ def main(argv=None):
     (cfg.run / "config.json").write_text(json.dumps({k: str(v) for k, v in vars(cfg).items()}, indent=1))
     dev = cfg.device
 
-    data = dataset.load(cfg.windows)
-    data.orientation.to_csv(cfg.run / "orientation.csv", index=False)
+    data = dataset.load(cfg.windows, step_g=cfg.step_g, clip_g=cfg.clip_g)
+    data.orientation.drop(columns="R").to_csv(cfg.run / "orientation.csv", index=False)
     birds = sorted(data.meta["bird"].unique())
     cohort = data.meta.groupby("bird")["cohort"].first().to_dict()
     hold = dataset.holdout_birds(birds, cohort, cfg.holdout_per_cohort)

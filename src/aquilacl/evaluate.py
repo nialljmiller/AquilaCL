@@ -5,6 +5,13 @@
    birds that never entered pretraining. Behaviour targets should score high; device targets low.
 3. Cluster stability: k-means on a bird-balanced sample of h for a range of k; adjusted Rand index between
    refits on bird-bootstrap samples (compare with the handcrafted baseline, ARI 0.35-0.44).
+4. Invariance tests on held-out birds (needs the checkpoint): re-encode windows after changing only the
+   recording format and count how often the k-means state stays the same.
+   - burst: a continuous 10 s window versus a 24- or 40-sample span of it (what a short bout records);
+   - sensitivity: a 1024 counts/g window re-gridded to 512 counts/g resolution, and a 512 counts/g window
+     clipped to the narrower 1024 counts/g range.
+   Reference: how often the state stays the same between consecutive windows of one segment.
+   A probe can always read recording length from the mask; what matters is whether states change.
 
 Usage: python -m aquilacl.evaluate --run <run dir> --windows <windows dir> --events <data>/events
 """
@@ -23,7 +30,7 @@ from sklearn.metrics import adjusted_rand_score, balanced_accuracy_score, r2_sco
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from . import probes
+from . import dataset, probes
 
 WINDOW_BEHAVIOUR_REG = ["vedba", "speed_mean", "climb_mean", "turn_abs_mean", "flap_band_frac", "sun_elev_deg"]
 WINDOW_LABELS = ["label_flapping", "label_perched", "label_circling", "label_gliding", "label_climbing_soar", "label_night"]
@@ -110,12 +117,89 @@ def cluster_stability(meta, H, rng, ks=(6, 8, 10, 12, 16, 20), per_bird=1000, n_
     return out
 
 
+def _latest_model(run: Path, dev: str):
+    import torch
+
+    from .model import Encoder
+    from .windows import GPS_CHANNELS
+
+    ck = sorted(run.glob("ckpt_*.pt"))[-1]
+    model = Encoder(len(GPS_CHANNELS)).to(dev)
+    model.load_state_dict(torch.load(ck, map_location=dev)["model"])
+    return model
+
+
+def invariance_tests(run, windows, meta, H, hold, rng, dev, k=12, n=20000, range_1024_g=2.0, step_512_g=1 / 512) -> dict:
+    """Same-state rates after changing only the recording format of held-out windows (see module docstring).
+
+    Format changes are applied in the sensor frame, then the run's own preparation (common format, rotation)
+    is applied exactly as in training, so the test is valid for runs with and without the format fix.
+    """
+    from .train import encode
+
+    cfg = json.loads((run / "config.json").read_text())
+    step_g, clip_g = float(cfg.get("step_g", 0)), float(cfg.get("clip_g", 0))
+    model = _latest_model(run, dev)
+    is_hold = meta["bird"].isin(hold).to_numpy()
+    tr = sample_per_bird(meta, ~is_hold, 1000, rng)
+    sc = StandardScaler().fit(H[tr])
+    km = KMeans(k, n_init=3, random_state=0).fit(sc.transform(H[tr]))
+
+    data = dataset.load(windows, birds=sorted(hold), rotate=False)
+    m = data.meta
+    R = {r.bird: np.asarray(r.R, np.float32).reshape(3, 3) for r in data.orientation.itertuples()}
+    Rrow = np.stack([R[b] for b in m["bird"]])
+
+    def states(sel, acc, am):
+        a = dataset.common_format(acc, am, step_g, clip_g).astype(np.float32)
+        a = np.einsum("ntj,nij->nti", a, Rrow[sel]) * am[..., None]
+        h = encode(model, a, am, data.gps[sel], data.gps_mask[sel], dev)[0]
+        return km.predict(sc.transform(h))
+
+    out = {"k": k}
+    allrows = np.arange(len(m))
+    st = states(allrows, data.acc, data.acc_mask)
+    seg, bird = m["segment"].to_numpy(), m["bird"].to_numpy()
+    nxt = (seg[1:] == seg[:-1]) & (bird[1:] == bird[:-1])
+    out["same_state_next_window"] = float((st[1:][nxt] == st[:-1][nxt]).mean())
+
+    # a long window versus one 40- or 64-sample burst of it, moved to the window start (as real short bouts)
+    long_ = np.flatnonzero(m["acc_samples"].to_numpy() >= 180)
+    sel = np.sort(rng.choice(long_, min(n, len(long_)), replace=False))
+    L = rng.choice([40, 64], len(sel))
+    start = (rng.random(len(sel)) * (200 - L)).astype(int)
+    t = np.arange(200)[None]
+    src = np.minimum(start[:, None] + t, 199)
+    am = np.take_along_axis(data.acc_mask[sel], src, 1) & (t < L[:, None])
+    a = np.take_along_axis(data.acc[sel], src[..., None], 1) * am[..., None]
+    out["burst_same_state"] = float((st[sel] == states(sel, a, am)).mean())
+    out["burst_n"] = int(len(sel))
+
+    kk = m["sensitivity_k"].to_numpy()
+    swaps = [
+        ("k1_regridded_to_512", kk == 1, lambda a: np.round(a.astype(np.float32) / step_512_g) * step_512_g),
+        ("k0_clipped_to_1024_range", kk == 0, lambda a: np.clip(a.astype(np.float32), -range_1024_g, range_1024_g)),
+    ]
+    for name, rows, fn in swaps:
+        rows = np.flatnonzero(rows)
+        if len(rows) < 50:
+            out[name + "_same_state"] = None
+            continue
+        sel = np.sort(rng.choice(rows, min(n, len(rows)), replace=False))
+        am = data.acc_mask[sel]
+        out[name + "_same_state"] = float((st[sel] == states(sel, fn(data.acc[sel]) * am[..., None], am)).mean())
+        out[name + "_n"] = int(len(sel))
+    return out
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--run", type=Path, required=True)
     ap.add_argument("--windows", type=Path, required=True)
     ap.add_argument("--events", type=Path, required=True)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--range-1024-g", type=float, default=2.0, help="+-g range of the 1024 counts/g setting")
     args = ap.parse_args(argv)
     rng = np.random.default_rng(args.seed)
     meta, H = load_run(args.run, args.windows)
@@ -136,6 +220,8 @@ def main(argv=None):
     res["holdout_birds"] = hold
     # 3. cluster stability
     res["cluster_stability_h"] = cluster_stability(meta, H, rng)
+    # 4. invariance to recording format
+    res["invariance"] = invariance_tests(args.run, args.windows, meta, H, hold, rng, args.device, range_1024_g=args.range_1024_g)
     (args.run / "evaluation.json").write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
 

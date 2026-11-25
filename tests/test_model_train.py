@@ -88,7 +88,8 @@ def test_train_embed_evaluate_smoke(tmp_path):
     win = _synthetic(tmp_path)
     run = tmp_path / "run"
     train.main(["--windows", str(win), "--run", str(run), "--steps", "300", "--batch", "64", "--birds-per-batch", "4",
-                "--warmup", "20", "--save-every", "150", "--holdout-per-cohort", "2", "--device", "cpu"])
+                "--warmup", "20", "--save-every", "150", "--holdout-per-cohort", "2", "--device", "cpu",
+                "--p-burst-crop", "0.5", "--step-g", "0.001953125", "--clip-g", "2.0"])
     loss = pd.read_csv(run / "loss.csv")
     assert loss["loss"].iloc[-1] < loss["loss"].iloc[0]
     assert len(list((run / "embeddings").glob("*.npz"))) == 10
@@ -100,3 +101,21 @@ def test_train_embed_evaluate_smoke(tmp_path):
     ev = json.loads((run / "evaluation.json").read_text())
     assert ev["window_level_holdout"]["label_flapping"]["balanced_accuracy"] > 0.9
     assert len(ev["holdout_birds"]) == 4
+    inv = ev["invariance"]
+    assert 0 <= inv["burst_same_state"] <= 1 and inv["k1_regridded_to_512_same_state"] is None
+
+
+def test_burst_crop_moves_span_to_start_and_common_format():
+    torch.manual_seed(0)
+    acc = torch.arange(200, dtype=torch.float32)[None, :, None].repeat(4, 1, 3)
+    mask = torch.ones(4, 200, dtype=torch.bool)
+    mask[3, 40:] = False  # already a short bout: left alone
+    a, m = train.burst_crop(acc, mask, (40,), p=1.0)
+    assert m[:3].sum(1).tolist() == [40, 40, 40] and m[:3, :40].all()
+    assert torch.equal(m[3], mask[3]) and torch.equal(a[3], acc[3])
+    d = a[:3, 1:40, 0] - a[:3, :39, 0]
+    assert torch.all(d == 1)  # contiguous samples, in order
+    # common format: 1024 counts/g data regridded to 1/512 g and clipped to +-2 g
+    x = np.array([[[0.0015, 2.5, -3.0]]], np.float32)
+    y = dataset.common_format(x, np.ones((1, 1), bool), 1 / 512, 2.0).astype(np.float32)
+    np.testing.assert_allclose(y[0, 0], [0.001953125, 2.0, -2.0], atol=1e-4)

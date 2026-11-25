@@ -45,9 +45,18 @@ def rotation_to_z(v: np.ndarray) -> np.ndarray:
     return np.eye(3) + s * K + (1 - c) * (K @ K)
 
 
-def roost_gravity(acc: np.ndarray, mask: np.ndarray, sun: np.ndarray, vedba: np.ndarray, max_vedba: float = 0.02):
-    """Mean gravity direction over quiet night windows; None if there are fewer than 20."""
-    sel = (sun < -6) & (vedba < max_vedba) & (mask.sum(axis=1) >= 20)
+def roost_gravity(acc: np.ndarray, mask: np.ndarray, sun: np.ndarray, vedba: np.ndarray, max_vedba: float = 0.02,
+                  speed: np.ndarray | None = None):
+    """Mean gravity direction over quiet night windows.
+
+    If there are fewer than 20, quiet windows at any time of day are used instead (and GPS speed below 0.5 m/s
+    where a fix exists). Returns (None, n) if there are still fewer than 20; the caller then uses the population
+    median direction, so that no bird is left in its raw mounting frame.
+    """
+    quiet = (vedba < max_vedba) & (mask.sum(axis=1) >= 20)
+    sel = quiet & (sun < -6)
+    if sel.sum() < 20:
+        sel = quiet & (~(speed >= 0.5) if speed is not None else True)
     if sel.sum() < 20:
         return None, int(sel.sum())
     a = acc[sel].astype(np.float32)
@@ -93,9 +102,15 @@ class WindowData:
 
 
 def load(windows: Path, birds: list[str] | None = None, step_g: float = 0.0, clip_g: float = 0.0,
-         rotate: bool = True) -> WindowData:
-    """Load windows; ``step_g``/``clip_g`` apply :func:`common_format`; ``rotate=False`` keeps the sensor frame
-    (the per-bird rotation is still estimated and returned in ``orientation``)."""
+         rotate: bool = True, mask_gps_channels: tuple[str, ...] = ()) -> WindowData:
+    """Load windows.
+
+    ``step_g``/``clip_g`` apply :func:`common_format`. ``rotate=False`` keeps the sensor frame (the per-bird
+    rotation is still estimated and returned in ``orientation``). ``mask_gps_channels`` are hidden from the
+    model (mask False, value 0), e.g. the horizontal-accuracy estimate, which describes fix quality, not behaviour.
+
+    Birds without enough quiet windows get the median roost direction of the other birds (``source`` column).
+    """
     dirs = sorted(p for p in windows.iterdir() if p.is_dir())
     if birds is not None:
         dirs = [d for d in dirs if d.name in set(birds)]
@@ -106,25 +121,38 @@ def load(windows: Path, birds: list[str] | None = None, step_g: float = 0.0, cli
         f = pd.read_parquet(d / "features.parquet")
         acc = np.load(d / "acc.npy")
         am = np.load(d / "acc_mask.npy")
-        v, n_used = roost_gravity(acc, am, m["sun_elev_deg"].to_numpy(), f["vedba"].to_numpy())
+        night_n = int(((m["sun_elev_deg"].to_numpy() < -6) & (f["vedba"].to_numpy() < 0.02) & (am.sum(1) >= 20)).sum())
+        v, n_used = roost_gravity(acc, am, m["sun_elev_deg"].to_numpy(), f["vedba"].to_numpy(),
+                                  speed=f["speed_mean"].to_numpy() if "speed_mean" in f else None)
         if step_g > 0 or clip_g > 0:
             acc = common_format(acc, am, step_g, clip_g)
-        R = rotation_to_z(v).astype(np.float32) if v is not None else np.eye(3, dtype=np.float32)
-        if v is not None and rotate:
-            acc = (acc.astype(np.float32) @ R.T).astype(np.float16) * am[:, :, None]
-        tilt = float(np.degrees(np.arccos(np.clip(v[2] / np.linalg.norm(v), -1, 1)))) if v is not None else float("nan")
-        orient.append({"bird": d.name, "roost_windows": n_used, "tilt_corrected_deg": tilt, "R": R.ravel().tolist()})
+        source = "none" if v is None else ("night" if night_n >= 20 else "day_still")
+        orient.append({"bird": d.name, "roost_windows": n_used, "source": source, "v": v})
         g = np.load(d / "gps.npy") / scale
         g[:, :, GPS_CHANNELS.index("eobs:horizontal-accuracy-estimate")] = np.log1p(
             np.load(d / "gps.npy")[:, :, GPS_CHANNELS.index("eobs:horizontal-accuracy-estimate")]
         )
         gm = np.load(d / "gps_mask.npy")
+        for c in mask_gps_channels:
+            gm[:, :, GPS_CHANNELS.index(c)] = False
         g = np.clip(g, -GPS_CLIP, GPS_CLIP) * gm
         accs.append(acc.astype(np.float16))
         amasks.append(am)
         gpss.append(g.astype(np.float16))
         gmasks.append(gm)
         metas.append(pd.concat([m, f], axis=1))
+    # orientation: per-bird roost direction, or the median of the others for birds without one
+    have = [o["v"] / np.linalg.norm(o["v"]) for o in orient if o["v"] is not None]
+    median_v = np.median(np.stack(have), axis=0) if have else np.array([0.0, 0.0, 1.0])
+    for o, i in zip(orient, range(len(accs))):
+        v = o.pop("v")
+        if v is None:
+            v, o["source"] = median_v, "population_median"
+        R = rotation_to_z(v).astype(np.float32)
+        if rotate:
+            accs[i] = (accs[i].astype(np.float32) @ R.T).astype(np.float16) * amasks[i][:, :, None]
+        o["tilt_corrected_deg"] = float(np.degrees(np.arccos(np.clip(v[2] / np.linalg.norm(v), -1, 1))))
+        o["R"] = R.ravel().tolist()
     meta = pd.concat(metas, ignore_index=True)
     first = meta.groupby("bird")["t_start"].transform("min")
     meta["cohort"] = np.where(first.dt.year <= 2024, "2024", "2025")

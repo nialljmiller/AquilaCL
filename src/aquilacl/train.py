@@ -140,6 +140,7 @@ def get_args(argv=None):
     ap.add_argument("--burst-lengths", type=int, nargs="+", default=[40, 64], help="lengths of real short bouts")
     ap.add_argument("--step-g", type=float, default=0.0, help="common acceleration step in g (0 = off), see dataset.common_format")
     ap.add_argument("--clip-g", type=float, default=0.0, help="common acceleration range +-g (0 = off)")
+    ap.add_argument("--mask-gps-channels", nargs="*", default=[], help="GPS channels hidden from the model")
     ap.add_argument("--rot-deg", type=float, default=15.0)
     ap.add_argument("--scale", type=float, default=0.1)
     ap.add_argument("--noise-g", type=float, default=0.01)
@@ -193,11 +194,12 @@ def main(argv=None):
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     cfg.run.mkdir(parents=True, exist_ok=True)
-    (cfg.run / "config.json").write_text(json.dumps({k: str(v) for k, v in vars(cfg).items()}, indent=1))
+    (cfg.run / "config.json").write_text(json.dumps({k: (v if isinstance(v, (int, float, list, bool)) else str(v)) for k, v in vars(cfg).items()}, indent=1))
     dev = cfg.device
 
-    data = dataset.load(cfg.windows, step_g=cfg.step_g, clip_g=cfg.clip_g)
+    data = dataset.load(cfg.windows, step_g=cfg.step_g, clip_g=cfg.clip_g, mask_gps_channels=tuple(cfg.mask_gps_channels))
     data.orientation.drop(columns="R").to_csv(cfg.run / "orientation.csv", index=False)
+    (cfg.run / "orientation.json").write_text(json.dumps(data.orientation.to_dict("records")))
     birds = sorted(data.meta["bird"].unique())
     cohort = data.meta.groupby("bird")["cohort"].first().to_dict()
     hold = dataset.holdout_birds(birds, cohort, cfg.holdout_per_cohort)

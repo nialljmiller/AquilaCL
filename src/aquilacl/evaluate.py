@@ -7,11 +7,16 @@
    refits on bird-bootstrap samples (compare with the handcrafted baseline, ARI 0.35-0.44).
 4. Invariance tests on held-out birds (needs the checkpoint): re-encode windows after changing only the
    recording format and count how often the k-means state stays the same.
-   - burst: a continuous 10 s window versus a 24- or 40-sample span of it (what a short bout records);
+   - burst: a continuous 10 s window versus a 40- or 64-sample span of it moved to the window start (what a short bout records);
    - sensitivity: a 1024 counts/g window re-gridded to 512 counts/g resolution, and a 512 counts/g window
      clipped to the narrower 1024 counts/g range.
+   - GPS removed from daytime windows that have both sensors (which states acceleration alone can assign).
    Reference: how often the state stays the same between consecutive windows of one segment.
    A probe can always read recording length from the mask; what matters is whether states change.
+   Once a run uses the common format, the two sensitivity swaps are identical by construction (score 1.0);
+   for such runs the evidence is the near-switch probe in (5).
+5. Nuisance probes next to the same probes on handcrafted features: sensitivity setting near switches
+   (birds with both settings) and bird identity on held-out birds (later half of each record).
 
 Usage: python -m aquilacl.evaluate --run <run dir> --windows <windows dir> --events <data>/events
 """
@@ -145,15 +150,18 @@ def invariance_tests(run, windows, meta, H, hold, rng, dev, k=12, n=20000, range
     sc = StandardScaler().fit(H[tr])
     km = KMeans(k, n_init=3, random_state=0).fit(sc.transform(H[tr]))
 
-    data = dataset.load(windows, birds=sorted(hold), rotate=False)
+    data = dataset.load(windows, birds=sorted(hold), rotate=False, mask_gps_channels=tuple(cfg.get("mask_gps_channels", [])))
     m = data.meta
     R = {r.bird: np.asarray(r.R, np.float32).reshape(3, 3) for r in data.orientation.itertuples()}
+    if (run / "orientation.json").exists():  # use the rotations the run was trained with
+        R.update({o["bird"]: np.asarray(o["R"], np.float32).reshape(3, 3) for o in json.loads((run / "orientation.json").read_text())})
     Rrow = np.stack([R[b] for b in m["bird"]])
 
-    def states(sel, acc, am):
+    def states(sel, acc, am, gm=None):
         a = dataset.common_format(acc, am, step_g, clip_g).astype(np.float32)
         a = np.einsum("ntj,nij->nti", a, Rrow[sel]) * am[..., None]
-        h = encode(model, a, am, data.gps[sel], data.gps_mask[sel], dev)[0]
+        gm = data.gps_mask[sel] if gm is None else gm
+        h = encode(model, a, am, data.gps[sel] * gm, gm, dev)[0]
         return km.predict(sc.transform(h))
 
     out = {"k": k}
@@ -175,6 +183,17 @@ def invariance_tests(run, windows, meta, H, hold, rng, dev, k=12, n=20000, range
     out["burst_same_state"] = float((st[sel] == states(sel, a, am)).mean())
     out["burst_n"] = int(len(sel))
 
+    # GPS removed from daytime windows that have both sensors: which states can acceleration alone assign?
+    both = np.flatnonzero((m["gps_fixes"].to_numpy() > 0) & (m["sun_elev_deg"].to_numpy() > 0))
+    if len(both) >= 50:
+        sel = np.sort(rng.choice(both, min(n, len(both)), replace=False))
+        s1 = states(sel, data.acc[sel], data.acc_mask[sel], np.zeros_like(data.gps_mask[sel]))
+        same = st[sel] == s1
+        out["gps_removed_same_state"] = float(same.mean())
+        out["gps_removed_same_state_by_state"] = {int(c): round(float(same[st[sel] == c].mean()), 3)
+                                                  for c in np.unique(st[sel]) if (st[sel] == c).sum() >= 50}
+        out["gps_removed_n"] = int(len(sel))
+
     kk = m["sensitivity_k"].to_numpy()
     swaps = [
         ("k1_regridded_to_512", kk == 1, lambda a: np.round(a.astype(np.float32) / step_512_g) * step_512_g),
@@ -189,6 +208,73 @@ def invariance_tests(run, windows, meta, H, hold, rng, dev, k=12, n=20000, range
         am = data.acc_mask[sel]
         out[name + "_same_state"] = float((st[sel] == states(sel, fn(data.acc[sel]) * am[..., None], am)).mean())
         out[name + "_n"] = int(len(sel))
+    return out
+
+
+def _feature_matrix(meta):
+    from .baseline import FEATURES
+
+    X = meta[[c for c in FEATURES if c in meta]].to_numpy(float)
+    miss = ~np.isfinite(X)
+    X = np.where(miss, np.nanmedian(X, axis=0), X)
+    return np.c_[X, ~np.isfinite(meta["speed_mean"].to_numpy(float)) if "speed_mean" in meta else miss.any(1)]  # + "no GPS"
+
+
+def nuisance_vs_features(meta, H, hold, rng, days=14, per_class=1500) -> dict:
+    """Nuisance probes on h next to the same probes on handcrafted features (the level behaviour alone explains).
+
+    sensitivity_near_switch: birds that use both settings, windows within ``days`` of a switch, grouped
+    5-fold by bird. bird_id_holdout: held-out birds, fit on the first half of each bird's time span, test on
+    the second half. A value on h well above the feature value means the representation carries the nuisance
+    beyond behaviour.
+    """
+    from sklearn.model_selection import GroupKFold
+
+    feats = _feature_matrix(meta)
+    out = {}
+    # sensitivity setting near switches
+    rows = []
+    for b, idx in meta.groupby("bird").indices.items():
+        d = meta.iloc[idx].sort_values("t_start")
+        k = d["sensitivity_k"].to_numpy()
+        if len(np.unique(k)) < 2:
+            continue
+        t = d["t_start"].to_numpy()
+        sw = t[1:][k[1:] != k[:-1]]
+        j = np.clip(np.searchsorted(sw, t), 1, len(sw)) if len(sw) > 1 else np.zeros(len(t), int)
+        dist = np.minimum(np.abs(t - sw[j - 1 if len(sw) > 1 else 0]), np.abs(t - sw[np.minimum(j, len(sw) - 1)]))
+        near = d.index.to_numpy()[dist <= np.timedelta64(days, "D")]
+        for c in np.unique(meta.loc[near, "sensitivity_k"]):
+            r = near[meta.loc[near, "sensitivity_k"].to_numpy() == c]
+            rows.append(rng.choice(r, min(per_class, len(r)), replace=False))
+    if rows:
+        r = np.concatenate(rows)
+        y = meta["sensitivity_k"].to_numpy()[r]
+        g = meta["bird"].to_numpy()[r]
+        for name, X in (("h", H[r]), ("features", feats[r])):
+            pred = np.empty(len(r), dtype=y.dtype)
+            for tr, te in GroupKFold(5).split(X, y, g):
+                mdl = make_pipeline(StandardScaler(), LogisticRegression(max_iter=2000, class_weight="balanced")).fit(X[tr], y[tr])
+                pred[te] = mdl.predict(X[te])
+            out[f"sensitivity_near_switch_{name}"] = float(balanced_accuracy_score(y, pred))
+        out["sensitivity_near_switch_birds"] = int(len(np.unique(g)))
+        out["sensitivity_near_switch_n"] = int(len(r))
+    # bird identity among held-out birds, later half of each bird's record
+    tr, te = [], []
+    for b in hold:
+        idx = np.flatnonzero(meta["bird"].to_numpy() == b)
+        if len(idx) < 100:
+            continue
+        idx = idx[np.argsort(meta["t_start"].to_numpy()[idx], kind="stable")]
+        half = len(idx) // 2
+        tr.append(rng.choice(idx[:half], min(2000, half), replace=False))
+        te.append(rng.choice(idx[half:], min(2000, len(idx) - half), replace=False))
+    tr, te = np.concatenate(tr), np.concatenate(te)
+    y = meta["bird"].to_numpy()
+    for name, X in (("h", H), ("features", feats)):
+        mdl = make_pipeline(StandardScaler(), LogisticRegression(max_iter=3000, class_weight="balanced")).fit(X[tr], y[tr])
+        out[f"bird_id_holdout_{name}"] = float(balanced_accuracy_score(y[te], mdl.predict(X[te])))
+    out["bird_id_chance"] = 1 / len(np.unique(y[tr]))
     return out
 
 
@@ -220,7 +306,9 @@ def main(argv=None):
     res["holdout_birds"] = hold
     # 3. cluster stability
     res["cluster_stability_h"] = cluster_stability(meta, H, rng)
-    # 4. invariance to recording format
+    # 4. nuisance probes against the handcrafted-feature level
+    res["nuisance_vs_features"] = nuisance_vs_features(meta, H, hold, rng)
+    # 5. invariance to recording format
     res["invariance"] = invariance_tests(args.run, args.windows, meta, H, hold, rng, args.device, range_1024_g=args.range_1024_g)
     (args.run / "evaluation.json").write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))

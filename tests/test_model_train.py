@@ -119,3 +119,15 @@ def test_burst_crop_moves_span_to_start_and_common_format():
     x = np.array([[[0.0015, 2.5, -3.0]]], np.float32)
     y = dataset.common_format(x, np.ones((1, 1), bool), 1 / 512, 2.0).astype(np.float32)
     np.testing.assert_allclose(y[0, 0], [0.001953125, 2.0, -2.0], atol=1e-4)
+
+
+def test_roost_gravity_falls_back_to_quiet_daytime_windows():
+    acc = np.tile(np.array([0.0, 0.6, 0.8], np.float16), (30, 200, 1))
+    mask = np.ones((30, 200), bool)
+    sun = np.full(30, 20.0)  # no night windows at all
+    vedba = np.full(30, 0.005)
+    v, n = dataset.roost_gravity(acc, mask, sun, vedba, speed=np.full(30, np.nan))
+    np.testing.assert_allclose(v, [0.0, 0.6, 0.8], atol=1e-3)
+    assert n == 30
+    v, _ = dataset.roost_gravity(acc, mask, sun, vedba, speed=np.full(30, 3.0))  # moving: not usable
+    assert v is None

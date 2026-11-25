@@ -25,6 +25,7 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--gps", type=Path, required=True)
 ap.add_argument("--reference", type=Path, required=True)
 ap.add_argument("--out", type=Path, required=True)
+ap.add_argument("--min-bout", type=int, default=10, help="fixes 1-2 s apart that make a continuous bout")
 a = ap.parse_args()
 if a.out.exists():
     raise SystemExit(f"{a.out} exists")
@@ -62,7 +63,7 @@ for f in files:
     # runs of 'fast' links
     run_id = np.cumsum(~fast)
     sizes = pd.Series(run_id).map(pd.Series(run_id).value_counts()).to_numpy()
-    in_bout = sizes >= 10
+    in_bout = sizes >= a.min_bout
     start = in_bout & np.r_[True, run_id[1:] != run_id[:-1]]  # first fix of each bout
     sched = ~in_bout
     sched_all.append(pd.DataFrame({"v": v[sched], "batt": batt[sched], "hour": (t[sched] // 3600) % 24}))

@@ -1,9 +1,11 @@
 #!/bin/bash
 # Time budgets (CPU only): share of TIME per behaviour from the scheduled (k=0) recording stream, with each scheduled
 # sample weighted by the time to the next one (capped at 1.5 x the schedule interval); measures whether the schedule
-# continues inside continuous bouts and imputes uncovered bout time as flight when it does not; daily hours stratified
-# by local solar hour (uncovered hour bins filled from the bird's own data, then the population); daily, monthly, diel
-# and group budgets with bootstrap-over-birds CIs; bird-level permutation tests of daily flight hours.
+# continues inside continuous bouts (bouts = aquilacl.flight.bout_ids) and, when it does not, classifies uncovered bout
+# time by the K=2/K=6/sub-state of its own k=1 windows; daily hours stratified by local solar hour (uncovered hour bins
+# filled from the bird's own data, then the population); month-balanced headline; daily, monthly, diel and group
+# budgets with bootstrap-over-birds CIs; bird-level permutation tests of daily flight hours (strata = deployment year,
+# nuisance AUC per comparison, Holm over the testable ones).
 # Reads WINDOWS, STATES2 (K=2), STATES6 (K=6), SUBSTATES and REFERENCE; writes only into OUT, which must be new or empty.
 #SBATCH --account=ai4wy-eap
 #SBATCH --partition=gp-1
@@ -17,7 +19,7 @@ source "$HOME/opt/miniforge3/etc/profile.d/conda.sh"; conda activate aquilacl
 # Usage: WINDOWS=<windows dir> STATES2=<states_r6_k2> STATES6=<states_r6_yaw60_bpb4> SUBSTATES=<substates_r6_k2> \
 #        REFERENCE="<Movebank reference CSV>" OUT=<new dir> [MIN_DIRECT_BINS=12] [FILL=population|own] \
 #        [N_BOOT=1000] [N_PERM=5000] \
-#        [BOUT_IMPUTATION=auto|on|off] sbatch 08_budgets.sh
+#        [BOUT_IMPUTATION=auto|on|off] sbatch 08_budgets.sh      (on = bout time typed for every bird, off = plain)
 : "${WINDOWS:?set WINDOWS}"; : "${STATES2:?set STATES2 to the K=2 states directory}"
 : "${STATES6:?set STATES6 to the K=6 states directory}"; : "${SUBSTATES:?set SUBSTATES to the substates directory}"
 : "${REFERENCE:?set REFERENCE to the Movebank reference-data CSV}"; : "${OUT:?set OUT to a new directory}"

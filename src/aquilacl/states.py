@@ -35,11 +35,13 @@ Method
 
 Fixed choices: PCA is fitted once and kept for all refits (it is a linear rotation of the embedding fitted on
 the balanced sample; refitting it per bootstrap would add cost, not information). States are numbered by
-ascending median vedba (full-recording windows), so 0 is the quietest.
+ascending median vedba of their GMM ``state`` windows with at least 40 samples, so 0 is the quietest (profiles
+are grouped by ``state_hmm``, so their vedba medians need not be strictly increasing).
 
 Outputs in ``--out`` (the interface read by stage 5b, aquilacl.analysis)
 - states.parquet: one row per window. bird, row (index within the bird's meta.parquet), t_start, segment,
-  k_in_segment, state (int, merged GMM), state_hmm (int), p_state (max state posterior of the GMM),
+  k_in_segment, pitch_rot_deg, roll_rot_deg (posture in the gravity-aligned frame),
+  state (int, merged GMM), state_hmm (int), p_state (max state posterior of the GMM),
   pca_1, pca_2, pca_3.
 - state_profiles.csv: one row per state_hmm (index ``state``). windows, birds, birds_2024, birds_2025; for
   vedba, odba, flap_band_frac, dom_freq_hz (windows with >= 40 samples only), pitch_rot_deg, roll_rot_deg
@@ -150,11 +152,11 @@ def load(run: Path, windows: Path, workers: int = 1) -> tuple[pd.DataFrame, np.n
 
 
 def balanced_sample(meta: pd.DataFrame, rows: np.ndarray, n: int, rng) -> np.ndarray:
-    """Up to n windows per bird, months equally weighted within the bird."""
+    """Up to n windows per bird, calendar months (year-month) equally weighted within the bird."""
     out = []
-    sub = meta.loc[rows, ["bird", "month"]]
+    sub = meta.loc[rows, ["bird"]].assign(ym=meta.loc[rows, "t_start"].dt.to_period("M").astype(str))
     for _, g in sub.groupby("bird"):
-        w = 1.0 / g.groupby("month")["month"].transform("size").to_numpy()
+        w = 1.0 / g.groupby("ym")["ym"].transform("size").to_numpy()
         out.append(rng.choice(g.index.to_numpy(), min(n, len(g)), replace=False, p=w / w.sum()))
     return np.sort(np.concatenate(out))
 
@@ -227,7 +229,7 @@ def jaccard_best(a: np.ndarray, b: np.ndarray, K: int) -> np.ndarray:
 
 def bic_k(X, K, seed) -> float:
     with threadpool_limits(1):
-        return float(GaussianMixture(K, covariance_type="diag", random_state=seed).fit(X).bic(X))
+        return float(GaussianMixture(K, covariance_type="diag", max_iter=300, random_state=seed).fit(X).bic(X))
 
 
 # ---------------------------------------------------------------- HMM
@@ -429,7 +431,7 @@ def run(run_dir: Path, windows: Path, out: Path, k: int | None = None, k_over: i
 
     log("profiles and outputs")
     out.mkdir(parents=True, exist_ok=True)
-    st = meta[["bird", "row", "t_start", "segment", "k_in_segment"]].copy()
+    st = meta[["bird", "row", "t_start", "segment", "k_in_segment", "pitch_rot_deg", "roll_rot_deg"]].copy()
     st["state"], st["state_hmm"], st["p_state"] = state.astype(np.int16), state_hmm.astype(np.int16), p_state.astype(np.float32)
     for i in range(min(3, X.shape[1])):
         st[f"pca_{i + 1}"] = X[:, i]

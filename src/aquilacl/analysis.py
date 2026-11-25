@@ -37,11 +37,14 @@ META_COLS = ["t_start", "segment", "k_in_segment", "sensitivity_k", "sun_elev_de
              "local_solar_hour"]
 FEATURES = {  # column: axis label with unit
     "vedba": "VeDBA (g)", "odba": "ODBA (g)", "flap_band_frac": "flap-band power fraction",
-    "dom_freq_hz": "dominant frequency (Hz)", "pitch_deg": "pitch (deg)", "roll_deg": "roll (deg)",
+    "dom_freq_hz": "dominant frequency (Hz)", "pitch_rot_deg": "pitch, gravity-aligned frame (deg)",
+    "roll_rot_deg": "roll, gravity-aligned frame (deg)",
     "speed_mean": "ground speed (m/s)", "climb_mean": "climb rate (m/s)", "turn_abs_mean": "|turn rate| (deg/s)",
 }
-CATALOGUE_COLS = ["bird", "t_start", "state_gmm", "state_hmm", "p_state", "vedba", "flap_band_frac", "pitch_deg",
-                  "speed_mean", "climb_mean", "turn_abs_mean", "sun_elev_deg", "local_solar_hour", "sensitivity_k",
+# Exact local solar hour or sun elevation together with the time would give the position (nest areas), so the
+# window-level outputs carry only coarse bins: whole hours and 5-degree sun-elevation steps.
+CATALOGUE_COLS = ["bird", "t_start", "state_gmm", "state_hmm", "p_state", "vedba", "flap_band_frac", "pitch_rot_deg",
+                  "speed_mean", "climb_mean", "turn_abs_mean", "solar_hour_bin", "sun_elev_bin", "sensitivity_k",
                   "acc_samples", "gps_fixes"]
 MIN_BIN_WINDOWS = 10  # a bird enters a time bin's bird-weighted share with at least this many windows
 MIN_BIRD_WINDOWS = 100  # a bird enters per-bird comparisons with at least this many windows
@@ -150,19 +153,25 @@ def _read(path: Path, want: list[str]) -> pd.DataFrame:
     return df
 
 
+def circular_mean_hour(h: pd.Series) -> float:
+    """Mean of a clock time (h), so that 23 h and 1 h average to 0 h, not 12 h."""
+    a = np.deg2rad(h.dropna().to_numpy(float) * 15.0)
+    return float(np.rad2deg(np.arctan2(np.sin(a).mean(), np.cos(a).mean())) / 15.0 % 24) if len(a) else np.nan
+
+
 def load_windows(states_dir: Path, windows: Path, out: Outputs, state_col: str = "state_hmm") -> pd.DataFrame:
     """One row per window with state, metadata, features and reference labels (no positions).
 
     ``state`` is the analysis state (``state_col`` of states.parquet); the unsmoothed GMM state is ``state_gmm``.
     """
     sp = states_dir / "states.parquet"
-    st = _read(sp, ["bird", "row", "state", "state_hmm", "p_state"])
+    st = _read(sp, ["bird", "row", "state", "state_hmm", "p_state", "pitch_rot_deg", "roll_rot_deg"])
     st["bird"] = st["bird"].astype(str)
     by_bird = dict(tuple(st.groupby("bird", sort=False)))
     frames = []
     for d in bird_dirs(windows):
         m = _read(d / "meta.parquet", META_COLS)
-        fcols = list(FEATURES) + [c for c in pq.read_schema(d / "features.parquet").names if c.startswith("label_")]
+        fcols = [c for c in FEATURES if not c.endswith("_rot_deg")] + [c for c in pq.read_schema(d / "features.parquet").names if c.startswith("label_")]
         m = pd.concat([m, _read(d / "features.parquet", fcols)], axis=1)
         s = by_bird.pop(d.name, None)
         if s is None:
@@ -191,6 +200,8 @@ def load_windows(states_dir: Path, windows: Path, out: Outputs, state_col: str =
     df["doy"] = df["t_start"].dt.dayofyear
     df["month"] = df["t_start"].dt.strftime("%Y-%m")
     df["regime"] = pd.Categorical(np.where(df["acc_samples"] >= FULL_SAMPLES, "full", "non-full"))
+    df["solar_hour_bin"] = np.floor(df["local_solar_hour"])  # coarse bins only in window-level outputs
+    df["sun_elev_bin"] = np.floor(df["sun_elev_deg"] / 5) * 5
     for c in ("state", "state_gmm", "state_hmm"):
         if c in df:
             df[c] = df[c].astype(int)
@@ -528,7 +539,7 @@ def state_profile_table(df: pd.DataFrame, states: list) -> pd.DataFrame:
                       "birds_over_1pct": (budget[states] >= 0.01).sum(),
                       "share_full_windows": g["regime"].apply(lambda s: (s == "full").mean()),
                       "share_with_gps": g["gps_fixes"].apply(lambda s: (s > 0).mean()),
-                      "median_local_solar_hour": g["local_solar_hour"].median()})
+                      "mean_local_solar_hour": g["local_solar_hour"].apply(circular_mean_hour)})
     for k in sorted(df["sensitivity_k"].dropna().unique()):
         t[f"share_sensitivity_k{int(k)}"] = g["sensitivity_k"].apply(lambda s, k=k: (s == k).mean())
     t = t.join(q).reindex(states)
@@ -617,8 +628,14 @@ def fig_state_format(prof: pd.DataFrame, df: pd.DataFrame, colours: dict):
 
 
 def pick_examples(df: pd.DataFrame, mask: np.ndarray, n: int, rng) -> pd.DataFrame:
-    """Up to n windows from distinct birds where possible, among the confident half (p_state >= median)."""
+    """Up to n windows from distinct birds where possible, among the confident half (p_state >= median).
+
+    p_state is the GMM posterior of the unsmoothed state, so only windows whose GMM state equals the card's
+    state are used when there are enough of them."""
     sub = df[mask]
+    if "state_gmm" in sub:
+        agree = sub[sub["state_gmm"] == sub["state"]]
+        sub = agree if len(agree) >= n else sub
     if "p_state" in sub and sub["p_state"].notna().any():
         sub = sub[sub["p_state"] >= sub["p_state"].median()]
     sub = sub.iloc[rng.permutation(len(sub))]
@@ -873,7 +890,7 @@ def knn_outliers(df: pd.DataFrame, run: Path, rng, per_group=300, min_group=30, 
     sample = sample.assign(knn_score=score).sort_values("knn_score", ascending=False)
     sample = sample.groupby("bird", observed=True).head(per_bird).head(top)
     cols = ["bird", "row", "t_start", "month", "regime", "state", "knn_score", "acc_samples", "sensitivity_k",
-            "gps_fixes", "vedba", "speed_mean", "local_solar_hour"]
+            "gps_fixes", "vedba", "speed_mean", "solar_hour_bin"]
     return sample[[c for c in cols if c in sample]]
 
 
@@ -1000,6 +1017,9 @@ def main(argv: list[str] | None = None) -> None:
     out.fig(fig_state_format(prof, df, colours), "m4_state_format.png", "M4",
             "is a state a recording format (sensitivity, full/non-full, GPS) or a few birds rather than a behaviour?")
     for s in states:
+        if not (df["state"] == s).any():
+            out.note(f"state {s} has no windows in the analysis column ({args.state_col}); no card")
+            continue
         out.fig(fig_state_card(df, args.windows, s, prof, colours, rng), f"m4_state_cards_{s}.png", "M4",
                 f"state {s}: example acceleration traces (8 windows, distinct birds where possible)")
 

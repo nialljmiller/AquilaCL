@@ -71,7 +71,7 @@ def test_pipeline_recovers_behaviours(tmp_path):
     s = states.run(run, win, out, k_over=8, k_min=2, k_max=8, per_bird=300, eval_per_bird=150, n_boot=20)
     assert s["chosen_k"] == N_BEHAV and s["rule_met"]
     st = pd.read_parquet(out / "states.parquet")
-    assert list(st.columns) == ["bird", "row", "t_start", "segment", "k_in_segment", "state", "state_hmm", "p_state",
+    assert list(st.columns) == ["bird", "row", "t_start", "segment", "k_in_segment", "pitch_rot_deg", "roll_rot_deg", "state", "state_hmm", "p_state",
                                 "pca_1", "pca_2", "pca_3"]
     assert "Bempty" not in set(st["bird"]) and len(st) == len(truth)
     for col in ("state", "state_hmm"):

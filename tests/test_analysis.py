@@ -40,7 +40,8 @@ def _inputs(tmp_path, n_seg=30, seg_len=20, seed=0):
                 acc.append(rng.normal(0, v, (200, 3)) + [0, 0, 1])
                 h.append(np.eye(16)[st] * 3 + rng.normal(0, 0.3, 16))
                 rows.append(dict(bird=bird, row=len(meta) - 1, t_start=meta[-1]["t_start"], segment=s, state=st,
-                                 state_hmm=st if k % 7 else (st + 1) % 3, p_state=float(rng.uniform(0.5, 1))))
+                                 state_hmm=st if k % 7 else (st + 1) % 3, p_state=float(rng.uniform(0.5, 1)),
+                                 pitch_rot_deg=float(rng.normal(0, 5)), roll_rot_deg=float(rng.normal(0, 5))))
         d = win / bird
         d.mkdir(parents=True)
         pd.DataFrame(meta).to_parquet(d / "meta.parquet")
@@ -124,6 +125,9 @@ def test_analysis_end_to_end(tmp_path):
     # privacy: no positions or comment text in any output
     cat = pd.read_csv(out / "m8_window_catalogue.csv.gz", nrows=5)
     assert not any("lat" in c or "lon" in c for c in cat.columns)
+    for p in list(out.glob("*.csv")) + [out / "m8_window_catalogue.csv.gz"]:  # exact solar time/elevation + time = position
+        cols = pd.read_csv(p, nrows=1).columns
+        assert "local_solar_hour" not in cols and "sun_elev_deg" not in cols, p.name
     for p in out.glob("*.csv"):
         assert "SECRET" not in p.read_text() and "43.1" not in p.read_text(), p.name
     cat = pd.read_csv(out / "m8_window_catalogue.csv.gz")
@@ -134,3 +138,13 @@ def test_analysis_end_to_end(tmp_path):
 
     with pytest.raises(SystemExit):
         analysis.main(args + ["--out", str(out)])
+
+
+def test_state_without_windows_in_analysis_column(tmp_path):
+    args = _inputs(tmp_path)
+    sp = tmp_path / "states" / "states.parquet"
+    st = pd.read_parquet(sp)
+    st.loc[st["state_hmm"] == 2, "state_hmm"] = 0  # smoothing emptied state 2
+    st.to_parquet(sp)
+    analysis.main(args + ["--out", str(tmp_path / "out2")])
+    assert "state 2 has no windows" in (tmp_path / "out2" / "index.md").read_text()

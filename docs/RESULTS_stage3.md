@@ -1,5 +1,9 @@
 # Stage 3 results (AI4WY job 61944, 2026-11-24)
 
+> **Superseded (2026-11-24):** built on profile_v2, which had the wrong sensitivity setting for 73% of
+> accelerometer bursts (DESIGN.md §6). Interpretations that depend on VeDBA levels (e.g. "slow daytime windows
+> at 0.19 g are activity on the ground") do not hold.
+
 ## Windows
 3,099,831 ten-second windows from 62 birds (6,530 dropped with < 1.2 s of acceleration); 1,477,142 contain GPS.
 Night windows are clean: median VeDBA 0.005 g, static vector 0.995 g (one bird checked). Slow daytime windows

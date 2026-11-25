@@ -1,5 +1,8 @@
 # Stage 4, run r1_tau0.2 (2026-11-24 export; AI4WY job 61985)
 
+> **Superseded (2026-11-24):** run on profile_v2, which had the wrong sensitivity setting for 73% of
+> accelerometer bursts (DESIGN.md §6).
+
 Training: 60,000 steps, batch 1024 (16 birds × 64 windows), τ 0.2, 4,306,574 training windows, 12 held-out
 birds, 754,496 parameters, 39 min on one GH200. Final loss 3.80; positive-pair cosine ≈ 0.86, negatives ≈ 0.
 

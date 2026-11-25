@@ -1,5 +1,10 @@
 # Stage 4: comparison of runs r1, r2 and r3
 
+> **Superseded (2026-11-24).** These runs used profile_v2, in which 73% of accelerometer bursts had the wrong
+> sensitivity setting (see DESIGN.md §6). Amplitude-dependent results are wrong; the comparison of settings
+> (τ, modality dropout) is kept only as an indication. The mean ARI differences between runs are within the noise
+> of 5 bootstraps.
+
 All three runs use the new Movebank export (2026-11-24), 5,515,018 windows, the same 12 held-out birds,
 60,000 steps and the same evaluation code. Only the settings named below differ.
 

@@ -39,7 +39,8 @@ characterise them through a SimCLR latent space.
      whole-modality dropout (accelerometer-only vs GPS-only views must agree; makes the 2024 and 2025 cohorts
      comparable);
    - accelerometer augmentations: small 3-D rotation (harness shift), gain scaling, noise;
-   - bird-balanced batches; negatives from the same bird within ±30 min are masked (likely the same behaviour);
+   - bird-balanced batches; negatives from the same bird within ±30 min are masked (likely the same behaviour;
+     implemented from run r4 on; r1–r3 masked only ±3 windows of the same segment);
    - vectorised NT-Xent, bf16, one H200; deterministic, augmentation-free inference.
 6. **Evaluation fixed before training**: ~12 birds held out from pretraining, stratified by cohort.
    - nuisance probes (should be low): bird id, cohort, decoding-software version, GPS density;
@@ -64,15 +65,16 @@ as a random effect; time of day is local solar time; every threshold lives in th
   stretch of 1 Hz GPS. 1 Hz runs and 5-minute fixes are not mixed in one encoder input. Training windows are
   sampled in proportion to movement (Yuan et al. 2024: without this, a pretext task stayed at chance).
 - **No per-window z-scoring.** Absolute speed, climb rate, VeDBA, pitch/roll and wingbeat band power carry the
-  behaviour. All accelerometer inputs use a common 24-sample (1.2 s) crop so that burst length (a schedule
-  property) cannot leak into the model. Dominant frequency is only used on 264-sample bursts; short bursts use
+  behaviour. Planned: a common crop so that burst length (a schedule property) cannot leak into the model.
+  Implemented instead (§6): burst-crop views drawn from the real lengths of non-full windows. Dominant frequency is only used on 264-sample bursts; short bursts use
   1.5–4 Hz band power (golden eagle wingbeat about 2.2–2.8 Hz).
 - **Calibration.** Gain and offset are fitted per tag from still bursts. The published tag-ID rule would give
   1/512 g per count for all these tags, which does not fit the sample (still bursts about 1,000 counts from 2048).
-  The fit decides; the rule is the cross-check. Each bird's frame is rotated so its median roosting gravity vector
-  points up.
-- **Negatives.** Batches built from a few birds with many windows each; batch size 256–2048 and τ 0.07–0.5 swept;
-  a false-negative-tolerant loss variant tested (Qian et al. 2022: >128 negatives hurt SimCLR on activity data).
+  The fit decides; the rule is the cross-check. (Superseded, §6: the setting depends on burst type.) Each bird's
+  frame is rotated so its median roosting gravity vector points up (§6: fallback for birds without roost windows).
+- **Negatives.** Batches built from a few birds with many windows each. Planned but not done: a batch-size sweep
+  and a false-negative-tolerant loss (Qian et al. 2022). Done: τ 0.1 and 0.2, with and without modality dropout
+  (r1–r3).
 - **Augmentations.** Noise, ±10% scaling, ±10–15° rotation, crops, cutout, token thinning, modality dropout. No full
   rotations, axis swaps, shuffling, strong time-warp or reversal (they destroy pitch, wingbeat and climb direction).
 - **Acceptance test (fixed before training).** Linear probes on held-out birds.
@@ -121,7 +123,44 @@ All jobs: account ai4wy-eap, partition gp-1, outputs only under /project/ai4wy-e
 - **Calibration.** After splitting each tag into sensitivity periods, 88 tag-periods with ≥50 still bursts give
   gains of 0.94–1.11 × the published 512 counts/g (median 1.01) and a median still-burst error of 0.0085 g.
   33 of 62 birds had periods at double sensitivity (~1024 counts/g), mostly April–September 2025. Two periods are
-  unreliable (one with 18 still bursts; one isolated single day).
+  unreliable (one with 18 still bursts; one isolated single day). **Wrong — see §6.**
 - **Consequence for the window.** The natural unit is a 10 s co-recorded window: 10 GPS fixes at 1 Hz plus 200
   accelerometer samples × 3 axes at 20 Hz. Short recording bouts give one window each; long continuous segments
   give consecutive windows, which also provide sequences for temporal models. Roughly 2.5 M windows (estimate).
+
+## 6. Corrections after the stage 4 reviews (2026-11-24)
+
+Three independent reviews (code, data, method) found the following. Earlier outputs are kept unchanged.
+
+- **Sensitivity setting is set by burst type, not by day.** Read from the raw counts of all 26.7 M bursts:
+  24-sample bursts (continuous mode) are recorded at about 1024 counts/g; 40- and 264-sample bursts at about
+  512 counts/g (within-tag ratio 2.001 ± 0.050 over 62 tags; no mixed group). The per-day rule of profile_v2 put
+  73.4% of bursts on the wrong setting, so most continuous-mode data read about 2 g at rest. profile_v2,
+  windows_10s, the stage 3 baseline and runs r1–r3 are therefore wrong for anything that depends on amplitude.
+  Now (profile_v3): k per (bird, tag, burst length) from the median raw norm of quiet bursts; calibration per
+  (tag, k); a setting with few still bursts or an unreliable fit takes the same tag's reliable calibration with
+  the gain scaled by 2^Δk; remaining unreliable calibrations are flagged and their bursts left out of windows.
+- **Sensitivity leak.** The two settings differ in step (about 0.002 vs 0.001 g) and range (±4 vs about ±1.9 g).
+  `format.json` (profile stage) gives the coarsest step and the narrowest range minus 0.05 g; training rounds and
+  clips all acceleration to these in the sensor frame, before rotation.
+- **Short-window leak.** Non-full windows are 40-sample bouts, 64-sample tails of 264-sample bursts and short runs
+  of continuous-mode bursts, all starting at slot 0. Training cuts one view of full windows to these empirical
+  lengths and moves it to the window start (probability 0.3).
+- **Window placement.** Consecutive 24-sample bursts are placed contiguously (start within 2 slots of the previous
+  end); before, 26% of windows had one-slot holes that revealed continuous recording. Overlapping samples are
+  dropped, not overwritten.
+- **Features and labels.** The static component is a 1 s running mean per contiguous run, so features no longer
+  depend on window fullness. Reference labels are NaN where their inputs are missing (before: "not perched" etc.
+  for windows without GPS, which let probes score by reading GPS presence).
+- **GPS.** Turn rate is masked for steps < 5 m or intervals < 1 s; fixes with track speed > 70 m/s or > 10 m/s
+  from ground speed are masked; climb outside +20/−70 m/s is masked. The horizontal-accuracy estimate is hidden
+  from the model (fix quality, not behaviour).
+- **Orientation.** Seven birds had too few roost windows and were left unrotated (≈116° from everyone else).
+  Now quiet daytime windows are used, else the population-median direction.
+- **Training.** NT-Xent similarities in float32; same-bird negatives within 30 min masked; resubmission with
+  different settings is refused.
+- **Evaluation.** Invariance tests (same k-means state after a burst crop, after removing GPS); sensitivity probe
+  on full windows of birds with both settings and a bird-identity probe, each next to the same probe on
+  handcrafted features. A nuisance probe on the mask (recording length) is expected to stay high; the burst
+  invariance test is the criterion.
+- **Baseline HMM.** Emissions now use p(x | state) without the mixture weights.

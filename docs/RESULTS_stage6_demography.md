@@ -117,3 +117,18 @@ The direction is consistent with flight development (less perching, more soaring
 3. Derive residency from the tracks, and test migrants against residents within cohort.
 4. Two-level anomaly scoring.
 5. Re-run the sex flight test within age class and within cohort.
+
+## 7. Sex in flight, stratified by cohort and age group (run 2026-11-25, interactive; r6 K=6 states)
+
+Each value is the female − male difference in bird-level medians. The overall p comes from permuting sex within cohort, and separately within age group (young-tagged vs not stated).
+
+| State | Variable | All birds | p within cohort | p within age group | Cohort 2024 | Cohort 2025 | Age not stated | Young-tagged |
+|---|---|---|---|---|---|---|---|---|
+| Thermal circling | Speed | +4.5% | 0.0010 | 0.0008 | +4.3% (p 0.015) | +4.7% (p 0.014) | +3.7% (p 0.006) | +6.9% (p 0.032) |
+| Thermal circling | Radius | +6.0% | 0.030 | 0.027 | +7.0% (0.09) | +4.0% (0.26) | +3.8% (0.19) | +9.7% (0.11) |
+| Cruising | Speed | +7.2% | 0.0012 | 0.0012 | +8.1% (0.002) | +5.9% (0.10) | +6.5% (0.009) | +8.4% (0.08) |
+| Cruising | Radius | +17.9% | 0.0004 | 0.0004 | +26.6% (0.001) | +9.4% (0.15) | +16.0% (0.003) | +32.3% (0.008) |
+
+- The direction is the same in every subgroup (females faster, wider turns).
+- Subgroup sizes: cohort 2024 f18/m12, cohort 2025 f14/m17, not stated f24/m25, young-tagged f8/m4.
+- The effect is not explained by cohort or by age at tagging.

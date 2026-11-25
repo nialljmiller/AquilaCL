@@ -220,7 +220,8 @@ def load_reference(path: Path, birds: list[str], out: Outputs) -> tuple[pd.DataF
         raise ValueError(f"reference CSV has none of the id columns {REF_FIELDS['id']}")
     ref = pd.read_csv(path, usecols=[c for c in cols.values() if c], dtype=str, keep_default_na=False)
     ref = ref.rename(columns={c: f for f, c in cols.items() if c})
-    ref["id"] = ref["id"].str.strip()
+    # Movebank exports may write the animal as "<ring id>; <tag id>": the bird id is the part before ";"
+    ref["id"] = ref["id"].str.split(";").str[0].str.strip()
     meta = pd.DataFrame({"bird": birds})
     rows = []
     for f in ("sex", "life_stage", "deploy_on"):

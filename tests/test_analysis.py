@@ -148,3 +148,25 @@ def test_state_without_windows_in_analysis_column(tmp_path):
     st.to_parquet(sp)
     analysis.main(args + ["--out", str(tmp_path / "out2")])
     assert "state 2 has no windows" in (tmp_path / "out2" / "index.md").read_text()
+
+
+def test_reference_id_with_tag_suffix(tmp_path):
+    """Movebank writes animal-id as "<ring id>; <tag id>"; birds must still match, and two deployments of one
+    animal with the same sex are not a conflict."""
+    from aquilacl import analysis
+
+    p = tmp_path / "ref.csv"
+    p.write_text("tag-id,animal-id,animal-sex,deploy-on-date\n"
+                 "1,0001-00001; 1,m,2024-06-01\n2,0001-00001; 2,m,2025-06-01\n3,0001-00002; 3,f,2024-07-01\n")
+
+    class _Out:
+        notes = []
+
+        def note(self, s):
+            self.notes.append(s)
+
+    meta, cov = analysis.load_reference(p, ["0001-00001", "0001-00002", "0001-00003"], _Out())
+    sex = meta.set_index("bird")["sex"]
+    assert sex.iloc[:2].tolist() == ["m", "f"] and pd.isna(sex.iloc[2])
+    assert int(cov.set_index("field").loc["sex", "matched"]) == 2
+    assert str(meta.set_index("bird")["deploy_on"].iloc[0].date()) == "2024-06-01"

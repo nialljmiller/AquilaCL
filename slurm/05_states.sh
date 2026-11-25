@@ -11,9 +11,9 @@
 #SBATCH --output=/project/ai4wy-eap/nmille39/aquilacl/logs/%x_%j.log
 set -euo pipefail
 source "$HOME/opt/miniforge3/etc/profile.d/conda.sh"; conda activate aquilacl
-# Usage: RUN=<run dir> WINDOWS=<windows dir> OUT=<new dir> [K=<states>] sbatch 05_states.sh
+# Usage: RUN=<run dir> WINDOWS=<windows dir> OUT=<new dir> [K=<states>] [K_MIN=<smallest K searched, default 6>] sbatch 05_states.sh
 : "${RUN:?set RUN to the run directory}"; : "${WINDOWS:?set WINDOWS}"; : "${OUT:?set OUT to a new directory}"
 echo "== states $(date)"
 python -m aquilacl.states --run "$RUN" --windows "$WINDOWS" --out "$OUT" --workers $(( SLURM_CPUS_PER_TASK - 2 )) \
-    ${K:+--k "$K"}
+    ${K:+--k "$K"} ${K_MIN:+--k-min "$K_MIN"}
 echo "== done $(date)"

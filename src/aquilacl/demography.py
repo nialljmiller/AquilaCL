@@ -282,7 +282,7 @@ def bird_pass(d: Path, info: dict, runs: list[dict], st_by_run: dict) -> dict | 
         o["m_budget"] = budget(mcode, state, M, K)
         o["m_hc"] = group_mean(mcode, M, hcX)[0]
         ms = np.where((mcode >= 0) & (state >= 0), mcode * K + state, -1)
-        o["m_h_state"] = group_mean(ms, M * K, h)[0].reshape(M, K, -1)
+        o["m_h_state"] = group_mean(ms, M * K, h)[0].reshape(M, K, h.shape[1])  # M may be 0 (no qualifying month)
         o["wb_state"] = [median_by(np.where(sel, state, -1), K, dom_full)
                          for sel in (np.ones(n, bool), sens == 0, sens == 1)]
         o["state_vedba"] = median_by(state, K, np.where(acc >= 40, f["vedba"].to_numpy(float), np.nan))[0] \

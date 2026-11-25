@@ -19,5 +19,7 @@ nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=cs
 echo "== train $RUN $(date)"
 python -m aquilacl.train --windows "$WINDOWS" --run "$ROOT/runs/$RUN" "$@"
 echo "== evaluate $RUN $(date)"
-python -m aquilacl.evaluate --run "$ROOT/runs/$RUN" --windows "$WINDOWS" --events "$DATA/events" --device cuda
+# optional: REFERENCE (Movebank reference CSV) and STATES2 (K=2 states dir) enable the r7 sex-in-flight probe
+python -m aquilacl.evaluate --run "$ROOT/runs/$RUN" --windows "$WINDOWS" --events "$DATA/events" --device cuda \
+    ${REFERENCE:+--reference "$REFERENCE"} ${STATES2:+--states2 "$STATES2"} ${EVAL_WORKERS:+--workers "$EVAL_WORKERS"}
 echo "== done $(date)"

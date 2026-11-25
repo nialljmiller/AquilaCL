@@ -11,6 +11,20 @@ Identity-reduction options (all off by default; r4 and earlier runs are unchange
 gradient-reversed bird classifier on h (DANN; loss = nt_xent + W * CE, reversal coefficient ramped over
 --bird-adv-warmup steps; adversary loss/accuracy in adv.csv); --axis-scale, --offset-g and --yaw-deg add per-axis
 gain, per-axis offset and rotation about gravity to the augmentation.
+
+r7 options (all off by default; r4/r6 settings train exactly as before):
+- --derotate-yaw: per-bird mounting yaw from flapping windows, rotated onto +x after the roost rotation
+  (dataset.load; applied to training and held-out birds alike, it uses only the ACC-derived flapping label).
+  orientation.json/csv record yaw_deg, yaw_n, yaw_resultant, yaw_ref_deg, yaw_source; R there is the combined
+  rotation. Birds with < 50 qualifying flapping windows get the population axis (yaw_source population_axis).
+  The 180 deg ambiguity (forward/backward) remains: --yaw-flip-p rotates a view by 180 deg about z with that
+  probability; --yaw-deg still adds a small jitter.
+- --p-neighbour P: with probability P the second view comes from a temporally adjacent window of the same bird
+  (same segment and recording mode, k_in_segment +-1, start gap <= 30 s; windows without one use themselves).
+- --mask-recon W: masked-reconstruction auxiliary on ACC (spans of --mask-span samples covering about
+  --mask-ratio of the present samples of the first view are zeroed and marked missing; a light decoder on the
+  ACC branch's per-timestep features predicts them; total loss = nt_xent + W * MSE; recon.csv).
+- --holdout-salt / --holdout-exclude: another held-out set, never containing the listed birds.
 """
 
 from __future__ import annotations
@@ -26,7 +40,7 @@ import pandas as pd
 import torch
 
 from . import dataset
-from .model import BirdHead, Encoder, grad_reverse, nt_xent
+from .model import AccDecoder, BirdHead, Encoder, grad_reverse, nt_xent
 from .windows import GPS_CHANNELS
 
 
@@ -88,6 +102,73 @@ def burst_crop(acc: torch.Tensor, mask: torch.Tensor, lengths: torch.Tensor, p: 
     return torch.where(do[:, None, None], shifted_a, acc), torch.where(do[:, None], shifted_m, mask)
 
 
+def flip_rotation(n: int, p: float, device) -> torch.Tensor:
+    """(n, 3, 3): with probability p a 180 deg rotation about +z (x, y -> -x, -y), else the identity."""
+    d = torch.ones(n, 3, device=device)
+    d[:, :2] = torch.where(torch.rand(n, device=device)[:, None] < p, -1.0, 1.0)
+    return torch.diag_embed(d)
+
+
+def mask_spans(amask: torch.Tensor, ratio: float, span: int) -> torch.Tensor:
+    """Spans to hide for masked reconstruction: (B, T) bool, True where a present sample is masked.
+
+    Each row with at least 2 * span present samples gets round(ratio * n_present / span) (at least 1) spans of
+    ``span`` samples, starting uniformly between its first and last present sample, so that about ``ratio`` of
+    its present samples are hidden (less where spans overlap). Rows with fewer present samples are left alone.
+    """
+    B, T = amask.shape
+    dev = amask.device
+    n = amask.sum(1)
+    first = torch.where(amask.any(1), amask.float().argmax(1), torch.zeros_like(n))
+    last = T - 1 - amask.flip(1).float().argmax(1)
+    k = torch.clamp(torch.round(ratio * n.float() / span), min=1).long()
+    kmax = max(1, int(math.ceil(ratio * T / span)))
+    room = (last - first + 1 - span).clamp(min=0)
+    start = first[:, None] + (torch.rand(B, kmax, device=dev) * (room[:, None] + 1).float()).long().clamp(max=T)
+    use = torch.arange(kmax, device=dev)[None] < k[:, None]
+    pos = torch.arange(T, device=dev)[None, None]
+    cover = ((pos >= start[..., None]) & (pos < start[..., None] + span) & use[..., None]).any(1)
+    return cover & amask & (n >= 2 * span)[:, None]
+
+
+def recon_loss(pred: torch.Tensor, target: torch.Tensor, hide: torch.Tensor) -> torch.Tensor:
+    """MSE (float32) over the hidden present samples and 3 axes; 0 when nothing is hidden."""
+    wm = hide[..., None].float()
+    return (((pred.float() - target.float()) ** 2) * wm).sum() / (3 * wm.sum()).clamp(min=1)
+
+
+def neighbour_index(meta: pd.DataFrame, max_gap_s: float = 30.0) -> np.ndarray:
+    """(N, 2) row positions of the previous and next window of each row in ``meta`` (positional order).
+
+    A neighbour is the window with k_in_segment -+ 1 of the same bird, segment and recording mode
+    (sensitivity_k) whose start is at most ``max_gap_s`` away. A missing neighbour is replaced by the other one,
+    and a window with neither uses itself in both columns.
+    """
+    key = ["bird", "segment", "sensitivity_k"]
+    d = meta[key + ["k_in_segment", "t_start"]].reset_index(drop=True)
+    d["pos"] = np.arange(len(d))
+    lookup = d.drop_duplicates(key + ["k_in_segment"])
+    out = []
+    for dk in (-1, 1):
+        q = d[key + ["k_in_segment", "t_start"]].assign(k_in_segment=d["k_in_segment"] + dk)
+        r = q.merge(lookup[key + ["k_in_segment", "t_start", "pos"]], on=key + ["k_in_segment"], how="left",
+                    suffixes=("", "_n"), validate="many_to_one")
+        ok = r["pos"].notna() & ((r["t_start_n"] - r["t_start"]).abs() <= pd.Timedelta(seconds=max_gap_s))
+        out.append(np.where(ok, r["pos"].fillna(-1), -1).astype(np.int64))
+    prev, nxt = out
+    self_ = np.arange(len(d))
+    p = np.where(prev >= 0, prev, np.where(nxt >= 0, nxt, self_))
+    n = np.where(nxt >= 0, nxt, np.where(prev >= 0, prev, self_))
+    return np.stack([p, n], axis=1)
+
+
+def pick_neighbour(i: torch.Tensor, nbr: torch.Tensor, p: float) -> torch.Tensor:
+    """Rows for the second view: with probability p a random neighbour (column 0 or 1 of ``nbr``) of row i."""
+    col = torch.randint(0, 2, i.shape, device=i.device)
+    use = torch.rand(i.shape, device=i.device) < p
+    return torch.where(use, nbr[i, col], i)
+
+
 def augment(acc, amask, gps, gmask, cfg, short_lengths: torch.Tensor) -> tuple:
     B = acc.shape[0]
     dev = acc.device
@@ -100,7 +181,11 @@ def augment(acc, amask, gps, gmask, cfg, short_lengths: torch.Tensor) -> tuple:
     Rz = yaw_rotation(B, yaw_deg, dev) if yaw_deg > 0 else None
     gain = torch.empty(B, 1, 3, device=dev).uniform_(1 - axis_scale, 1 + axis_scale) if axis_scale > 0 else None
     offset = torch.empty(B, 1, 3, device=dev).uniform_(-offset_g, offset_g) if offset_g > 0 else None
+    flip_p = getattr(cfg, "yaw_flip_p", 0.0)
+    Rf = flip_rotation(B, flip_p, dev) if flip_p > 0 else None
     a = acc.float()
+    if Rf is not None:
+        a = a @ Rf.transpose(1, 2)  # forward/backward ambiguity of the de-rotated yaw (about +z, commutes with Rz)
     if Rz is not None:
         a = a @ Rz.transpose(1, 2)  # yaw about gravity (+z) first, in the roost-aligned frame
     a = (a @ R.transpose(1, 2)) * scale
@@ -194,6 +279,18 @@ def parser() -> argparse.ArgumentParser:
                     help="confusion: head trained on detached h, encoder pushes the head's output towards uniform "
                          "(bounded, stable); reverse: gradient reversal of the head's cross-entropy (DANN; diverged "
                          "in tests, the encoder makes the head confidently wrong and h grows)")
+    # r7 options, all off by default
+    ap.add_argument("--derotate-yaw", action="store_true",
+                    help="rotate each bird's flapping axis (mounting yaw, mod 180 deg) onto +x after the roost rotation")
+    ap.add_argument("--yaw-flip-p", type=float, default=0.0, help="probability of a 180 deg rotation about +z per view")
+    ap.add_argument("--p-neighbour", type=float, default=0.0,
+                    help="probability that the second view is an adjacent window of the same continuous segment")
+    ap.add_argument("--mask-recon", type=float, default=0.0, help="weight of the masked ACC reconstruction loss (0 = off)")
+    ap.add_argument("--mask-ratio", type=float, default=0.3, help="share of present ACC samples hidden for reconstruction")
+    ap.add_argument("--mask-span", type=int, default=10, help="length in samples of each hidden span")
+    ap.add_argument("--holdout-salt", default="aquilacl", help="salt of the held-out bird hash ('aquilacl' = earlier runs)")
+    ap.add_argument("--holdout-exclude", type=Path, default=None,
+                    help="JSON list of bird ids that must not be held out (e.g. an earlier run's holdout.json)")
     return ap
 
 
@@ -284,12 +381,14 @@ def main(argv=None):
     record_config(cfg)
     dev = cfg.device
 
-    data = dataset.load(cfg.windows, step_g=cfg.step_g, clip_g=cfg.clip_g, mask_gps_channels=tuple(cfg.mask_gps_channels))
+    data = dataset.load(cfg.windows, step_g=cfg.step_g, clip_g=cfg.clip_g, mask_gps_channels=tuple(cfg.mask_gps_channels),
+                        derotate_yaw=cfg.derotate_yaw)
     data.orientation.drop(columns="R").to_csv(cfg.run / "orientation.csv", index=False)
     (cfg.run / "orientation.json").write_text(json.dumps(data.orientation.to_dict("records")))
     birds = sorted(data.meta["bird"].unique())
     cohort = data.meta.groupby("bird")["cohort"].first().to_dict()
-    hold = dataset.holdout_birds(birds, cohort, cfg.holdout_per_cohort)
+    exclude = json.loads(cfg.holdout_exclude.read_text()) if cfg.holdout_exclude is not None else None
+    hold = dataset.holdout_birds(birds, cohort, cfg.holdout_per_cohort, salt=cfg.holdout_salt, exclude=exclude)
     (cfg.run / "holdout.json").write_text(json.dumps(hold, indent=1))
     train_rows = ~data.meta["bird"].isin(hold).to_numpy()
 
@@ -310,6 +409,11 @@ def main(argv=None):
                                  if len(short) else np.array([cfg.min_acc_samples])).long().to(dev)
     w = np.clip(meta_tr["vedba"].fillna(0.01).to_numpy(), 0.01, 2.0) ** cfg.movement_power
     sampler = BirdBatchSampler(bird_code, w, cfg.batch, cfg.birds_per_batch, cfg.seed)
+    nbr = None
+    if cfg.p_neighbour > 0:
+        nbr = torch.from_numpy(neighbour_index(meta_tr)).to(dev)
+        n_with = int((nbr[:, 0] != torch.arange(len(nbr), device=dev)).sum())
+        print(f"neighbour index: {n_with:,} of {len(nbr):,} training windows have an adjacent window")
 
     model = Encoder(len(GPS_CHANNELS)).to(dev)
     params = list(model.parameters())
@@ -317,6 +421,10 @@ def main(argv=None):
     if cfg.bird_adv > 0:  # adversary over the training birds only (held-out birds never enter)
         head = BirdHead(model.fuse[-1].out_features, int(bird_code.max()) + 1, cfg.bird_adv_hidden).to(dev)
         params += list(head.parameters())
+    decoder = None
+    if cfg.mask_recon > 0:  # decoder from the ACC branch's per-timestep features (2 * width channels)
+        decoder = AccDecoder(model.acc.out.in_features // 2).to(dev)
+        params += list(decoder.parameters())
     opt = torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
     step = 0
     ckpts = sorted(cfg.run.glob("ckpt_*.pt"))
@@ -325,6 +433,8 @@ def main(argv=None):
         model.load_state_dict(ck["model"])
         if head is not None:
             head.load_state_dict(ck["bird_head"])
+        if decoder is not None:
+            decoder.load_state_dict(ck["acc_decoder"])
         opt.load_state_dict(ck["opt"])
         step = ck["step"]
         sampler.rng = np.random.default_rng(cfg.seed + step)
@@ -340,21 +450,40 @@ def main(argv=None):
         adv_log = open(cfg.run / "adv.csv", "a")
         if adv_log.tell() == 0:
             adv_log.write("step,adv_loss,adv_acc,coeff\n")
+    rec_log = None
+    if decoder is not None:
+        rec_log = open(cfg.run / "recon.csv", "a")
+        if rec_log.tell() == 0:
+            rec_log.write("step,recon_loss,masked_frac\n")
     t0 = time.time()
     while step < cfg.steps and not cfg.embed_only:
         i = torch.from_numpy(sampler()).to(dev)
         a, am, g, gm = A[i], AM[i], G[i], GM[i]
         v0 = augment(a, am, g, gm, cfg, short_len)
-        v1 = augment(a, am, g, gm, cfg, short_len)
+        if nbr is not None:  # second view from an adjacent window of the same segment (same bird: same neg mask)
+            j = pick_neighbour(i, nbr, cfg.p_neighbour)
+            v1 = augment(A[j], AM[j], G[j], GM[j], cfg, short_len)
+        else:
+            v1 = augment(a, am, g, gm, cfg, short_len)
+        if decoder is not None:  # hide spans of the first view; the decoder predicts them from the same pass
+            hide = mask_spans(v0[1], cfg.mask_ratio, cfg.mask_span)
+            target = v0[0]
+            v0 = (v0[0] * ~hide[..., None], v0[1] & ~hide, v0[2], v0[3])
         same = (bcode_t[i][:, None] == bcode_t[i][None]) & ((tsec[i][:, None] - tsec[i][None]).abs() <= cfg.neg_mask_s)
         for gp in opt.param_groups:
             gp["lr"] = lr_at(step, cfg)
         with torch.autocast(dev.split(":")[0], dtype=torch.bfloat16, enabled=dev.startswith("cuda")):
-            h0, z0 = model(*v0)
+            if decoder is not None:
+                h0, z0, y0 = model(*v0, return_acc_seq=True)
+            else:
+                h0, z0 = model(*v0)
             h1, z1 = model(*v1)
         with torch.autocast(dev.split(":")[0], enabled=False):
             loss = nt_xent(z0.float(), z1.float(), cfg.tau, same)
             con_loss = loss  # loss.csv keeps the contrastive term alone, comparable with runs without adversary
+            if decoder is not None:
+                recon = recon_loss(decoder(y0.float(), target.shape[1]), target, hide)
+                loss = loss + cfg.mask_recon * recon
             if head is not None:
                 coeff = adv_coeff(step, cfg.bird_adv_warmup)
                 hb = torch.cat([h0, h1]).float()
@@ -375,6 +504,8 @@ def main(argv=None):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         if head is not None:
             torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
+        if decoder is not None:
+            torch.nn.utils.clip_grad_norm_(decoder.parameters(), 1.0)
         opt.step()
         step += 1
         if step % 100 == 0:
@@ -389,15 +520,23 @@ def main(argv=None):
                 acc_adv = (logits.argmax(1) == yb).float().mean().item()
                 adv_log.write(f"{step},{adv_loss.item():.5f},{acc_adv:.4f},{coeff:.4f}\n")
                 adv_log.flush()
+            if rec_log is not None:
+                frac = (hide.sum() / (hide.sum() + v0[1].sum()).clamp(min=1)).item()  # hidden / present before hiding
+                rec_log.write(f"{step},{recon.item():.6f},{frac:.4f}\n")
+                rec_log.flush()
         if step % cfg.save_every == 0 or step == cfg.steps:
             ck = {"step": step, "model": model.state_dict(), "opt": opt.state_dict()}
             if head is not None:
                 ck["bird_head"] = head.state_dict()
+            if decoder is not None:
+                ck["acc_decoder"] = decoder.state_dict()
             torch.save(ck, cfg.run / f"ckpt_{step:07d}.pt")
             print(f"step {step} loss {loss.item():.4f} ({time.time() - t0:.0f} s)", flush=True)
     log.close()
     if adv_log is not None:
         adv_log.close()
+    if rec_log is not None:
+        rec_log.close()
     del A, AM, G, GM
     embed(model, data, dev, cfg.run / "embeddings")
     print("embeddings written")

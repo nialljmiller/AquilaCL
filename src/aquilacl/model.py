@@ -5,6 +5,8 @@ GPS (10 s x C kinematics, + mask)       -> per-second linear embedding + small t
 A sensor that is absent from the window is replaced by a learned "missing" vector, so the model never sees
 zero-filled inputs posing as measurements.
 fusion MLP -> h (representation); projection MLP -> z (used only by the contrastive loss).
+Optional (training only, --mask-recon): AccDecoder maps the acceleration branch's per-timestep features (before
+pooling) back to 3-axis acceleration for a masked-reconstruction auxiliary loss.
 """
 
 from __future__ import annotations
@@ -37,14 +39,34 @@ class AccEncoder(nn.Module):
         )
         self.out = nn.Linear(4 * width, out)
 
-    def forward(self, acc, mask):  # acc (B, T, 3), mask (B, T)
+    def seq_features(self, acc, mask):  # acc (B, T, 3), mask (B, T) -> (B, 2 * width, T/4)
         x = torch.cat([acc, mask[..., None].to(acc.dtype)], dim=-1).transpose(1, 2)
-        y = self.net(x)  # (B, C, T/4)
+        return self.net(x)
+
+    def pool(self, y, mask):
         m = F.max_pool1d(mask[:, None].float(), 4, 4, ceil_mode=True)[:, :, : y.shape[-1]]
         n = m.sum(-1).clamp(min=1)
         mean = (y * m).sum(-1) / n
         mx = y.masked_fill(m == 0, -1e4).amax(-1)
         return self.out(torch.cat([mean, mx], dim=-1))
+
+    def forward(self, acc, mask):  # acc (B, T, 3), mask (B, T)
+        return self.pool(self.seq_features(acc, mask), mask)
+
+
+class AccDecoder(nn.Module):
+    """Light decoder: (B, C, T/4) per-timestep features -> (B, T, 3) acceleration (x4 transposed conv, 1x1 conv)."""
+
+    def __init__(self, c_in: int = 128, hidden: int = 64):
+        super().__init__()
+        self.up = nn.ConvTranspose1d(c_in, hidden, 4, stride=4)
+        self.out = nn.Conv1d(hidden, 3, 1)
+
+    def forward(self, y, T: int):
+        x = self.out(F.gelu(self.up(y)))  # (B, 3, 4 * T/4)
+        if x.shape[-1] < T:
+            x = F.pad(x, (0, T - x.shape[-1]))
+        return x[..., :T].transpose(1, 2)
 
 
 class GpsEncoder(nn.Module):
@@ -76,13 +98,15 @@ class Encoder(nn.Module):
         self.fuse = nn.Sequential(nn.Linear(acc_dim + gps_dim, 256), nn.GELU(), nn.Linear(256, h_dim))
         self.proj = nn.Sequential(nn.Linear(h_dim, h_dim), nn.BatchNorm1d(h_dim), nn.GELU(), nn.Linear(h_dim, z_dim))
 
-    def forward(self, acc, acc_mask, gps, gps_mask):
+    def forward(self, acc, acc_mask, gps, gps_mask, return_acc_seq: bool = False):
+        """(h, z); with ``return_acc_seq`` also the acceleration branch's per-timestep features (B, C, T/4)."""
         has_acc = acc_mask.any(-1, keepdim=True)
         has_gps = gps_mask.flatten(1).any(-1, keepdim=True)
-        a = torch.where(has_acc, self.acc(acc, acc_mask), self.acc_missing.to(acc.dtype))
+        y = self.acc.seq_features(acc, acc_mask)
+        a = torch.where(has_acc, self.acc.pool(y, acc_mask), self.acc_missing.to(acc.dtype))
         g = torch.where(has_gps, self.gps(gps, gps_mask), self.gps_missing.to(gps.dtype))
         h = self.fuse(torch.cat([a, g], dim=-1))
-        return h, self.proj(h)
+        return (h, self.proj(h), y) if return_acc_seq else (h, self.proj(h))
 
 
 def nt_xent(z0: torch.Tensor, z1: torch.Tensor, tau: float, extra_mask: torch.Tensor | None = None) -> torch.Tensor:

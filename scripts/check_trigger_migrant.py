@@ -80,7 +80,7 @@ for f in files:
     st = t[start]
     si = np.flatnonzero(sched)
     k = np.searchsorted(st, t[si], side="right")
-    has = (k < len(st)) & ((st[np.minimum(k, len(st) - 1)] - t[si]) <= 900)
+    has = ((k < len(st)) & ((st[np.minimum(k, len(st) - 1)] - t[si]) <= 900)) if len(st) else np.zeros(len(si), bool)
     per_bird.append({"bird": bird, "sched_fast_then_bout": float(has[v[si] > 5].mean()) if (v[si] > 5).any() else np.nan,
                      "sched_slow_then_bout": float(has[v[si] < 1].mean()) if (v[si] < 1).any() else np.nan,
                      "n_bouts": int(start.sum())})

@@ -1,3 +1,4 @@
+import pytest
 import json
 
 import numpy as np
@@ -90,19 +91,24 @@ def test_train_embed_evaluate_smoke(tmp_path):
     train.main(["--windows", str(win), "--run", str(run), "--steps", "300", "--batch", "64", "--birds-per-batch", "4",
                 "--warmup", "20", "--save-every", "150", "--holdout-per-cohort", "2", "--device", "cpu",
                 "--p-burst-crop", "0.5", "--step-g", "0.001953125", "--clip-g", "2.0"])
+    # resubmitting with different settings is refused
+    with pytest.raises(SystemExit):
+        train.main(["--windows", str(win), "--run", str(run), "--steps", "300", "--tau", "0.1", "--device", "cpu",
+                    "--step-g", "0.001953125", "--clip-g", "2.0"])
     loss = pd.read_csv(run / "loss.csv")
     assert loss["loss"].iloc[-1] < loss["loss"].iloc[0]
     assert len(list((run / "embeddings").glob("*.npz"))) == 10
     # resume does not truncate the log and does not retrain past --steps
     train.main(["--windows", str(win), "--run", str(run), "--steps", "300", "--batch", "64", "--birds-per-batch", "4",
-                "--holdout-per-cohort", "2", "--device", "cpu"])
+                "--holdout-per-cohort", "2", "--device", "cpu", "--p-burst-crop", "0.5", "--step-g", "0.001953125",
+                "--clip-g", "2.0", "--warmup", "20"])
     assert len(pd.read_csv(run / "loss.csv")) == len(loss)
     evaluate.main(["--run", str(run), "--windows", str(win), "--events", str(tmp_path / "events")])
     ev = json.loads((run / "evaluation.json").read_text())
     assert ev["window_level_holdout"]["label_flapping"]["balanced_accuracy"] > 0.9
     assert len(ev["holdout_birds"]) == 4
     inv = ev["invariance"]
-    assert 0 <= inv["burst_same_state"] <= 1 and inv["k1_regridded_to_512_same_state"] is None
+    assert 0 <= inv["burst_same_state"] <= 1 and inv["k1_regridded_to_512_same_state"] is None or isinstance(inv["k1_regridded_to_512_same_state"], str)
 
 
 def test_burst_crop_moves_span_to_start_and_common_format():
@@ -110,7 +116,7 @@ def test_burst_crop_moves_span_to_start_and_common_format():
     acc = torch.arange(200, dtype=torch.float32)[None, :, None].repeat(4, 1, 3)
     mask = torch.ones(4, 200, dtype=torch.bool)
     mask[3, 40:] = False  # already a short bout: left alone
-    a, m = train.burst_crop(acc, mask, (40,), p=1.0)
+    a, m = train.burst_crop(acc, mask, torch.tensor([40]), p=1.0)
     assert m[:3].sum(1).tolist() == [40, 40, 40] and m[:3, :40].all()
     assert torch.equal(m[3], mask[3]) and torch.equal(a[3], acc[3])
     d = a[:3, 1:40, 0] - a[:3, :39, 0]

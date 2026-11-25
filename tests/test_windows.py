@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
+import pytest
 
-from aquilacl import gps, profile, windows
+from aquilacl import features, gps, profile, windows
 from test_profile import _write, OFFSET  # noqa: F401  (shared synthetic helpers)
 from test_core import _thermal
 
@@ -53,6 +54,7 @@ def test_build_bird_windows_and_labels(tmp_path):
     pd.DataFrame(cal).to_csv(prof / "calibration.csv", index=False)
     calib = windows.load_calibration(prof / "calibration.csv")
     s = windows.build_bird("B1", ev, prof, calib, tmp_path / "win")
+    assert s["samples_dropped_overlap"] == 0 and s["bursts_snapped"] == 0  # exact 1.2 s bursts are already contiguous
 
     meta = pd.read_parquet(tmp_path / "win" / "B1" / "meta.parquet")
     f = pd.read_parquet(tmp_path / "win" / "B1" / "features.parquet")
@@ -62,11 +64,62 @@ def test_build_bird_windows_and_labels(tmp_path):
     assert (meta.loc[seg, "acc_samples"] == 200).all()
     day = f[seg.to_numpy()]
     assert np.allclose(day["dom_freq_hz"], 2.5, atol=0.15)
-    assert day["label_flapping"].all() and day["label_circling"].sum() == 0  # flapping is not soaring
+    assert (day["label_flapping"] == 1).all() and (day["label_circling"] == 0).all()  # flapping is not soaring
     assert (day["turn_abs_mean"] > 6).all() and (day["climb_mean"] > 1.5).all()
     nights = f[(meta["sun_elev_deg"] < -6).to_numpy()]
-    assert len(nights) >= 10 and nights["label_night"].all() and not nights["label_flapping"].any()
+    assert len(nights) >= 10 and (nights["label_night"] == 1).all() and (nights["label_flapping"] != 1).all()
     m = np.load(tmp_path / "win" / "B1" / "acc_mask.npy")[~seg.to_numpy()]
     still = acc[~seg.to_numpy()].astype(float)
     mean_vec = (still * m[:, :, None]).sum(axis=1) / m.sum(axis=1, keepdims=True)
     assert abs(np.linalg.norm(mean_vec, axis=1).mean() - 1) < 0.05  # calibrated still windows read 1 g
+
+
+@pytest.mark.parametrize(
+    "gap_s, jitter_s, snaps, dropped_each, hole_each",
+    [
+        (1.2, 0.0, False, 0, 0),  # exact continuous mode
+        (1.2, 0.035, True, 0, 0),  # jittered starts (1.13-1.27 s apart): snapped, no holes, no collisions
+        (0.8, 0.0, False, 8, 0),  # real overlap: the 8 overlapping samples of each later burst are dropped
+        (1.7, 0.0, False, 0, 10),  # real 0.5 s gap: placed by time, the hole stays
+    ],
+)
+def test_place_bursts_contiguous(gap_s, jitter_s, snaps, dropped_each, hole_each):
+    n = 30
+    ts = np.arange(n) * gap_s + np.random.default_rng(3).uniform(-jitter_s, jitter_s, n)
+    ts -= ts[0]
+    n_samp = np.full(n, 24)
+    r = np.round(ts * windows.FS).astype(int)
+    start, drop, snapped = windows.place_bursts(r, n_samp, np.zeros(n, int))
+    filled = np.zeros(int((start + n_samp).max()), int)
+    for s0, d, k in zip(start, drop, n_samp):
+        filled[s0 + d:s0 + k] += 1
+    assert filled.max() == 1  # never overwritten
+    assert (filled == 0).sum() == hole_each * (n - 1)
+    assert drop[1:].tolist() == [dropped_each] * (n - 1)
+    assert snapped.any() == snaps
+    assert (np.abs(start - r) <= windows.SNAP_SLOTS).all()  # every burst stays near its timestamp
+
+
+@pytest.mark.parametrize("n_present", [200, 64, 40])
+def test_features_do_not_depend_on_window_fullness(n_present):
+    rng = np.random.default_rng(4)
+    t = np.arange(200) / windows.FS
+    g = np.c_[np.zeros(200), np.zeros(200), 1 + 0.033 * t] + rng.normal(0, 0.05, (200, 3))  # slow drift + noise
+    full = features.acc_features(g[None], np.ones((1, 200), bool)).iloc[0]
+    m = np.zeros((1, 200), bool)
+    m[0, 50:50 + n_present] = True
+    part = features.acc_features(g[None], m).iloc[0]
+    assert part["vedba"] == pytest.approx(full["vedba"], rel=0.15)
+    assert part["static_norm"] == pytest.approx(full["static_norm"], abs=0.05)
+    assert np.isfinite(part["flap_band_frac"])  # spectrum from >= MIN_SPECTRUM_SAMPLES contiguous samples
+
+
+def test_labels_unknown_without_inputs():
+    nan = np.nan
+    f = pd.DataFrame({"vedba": [0.02, 0.02, 0.5], "flap_band_frac": [0.1, nan, 0.6], "speed_mean": [0.2, nan, nan],
+                      "turn_abs_mean": [nan, nan, nan], "climb_mean": [0.0, nan, nan], "n_speed": [10, 0, 0], "n_turn": [0, 0, 0]})
+    lab = features.reference_labels(f, np.array([10.0, 10.0, nan]))
+    assert lab.loc[0, ["perched", "flapping", "night", "climbing_soar"]].tolist() == [1.0, 0.0, 0.0, 0.0]
+    assert lab.loc[0, ["circling", "gliding"]].isna().all()  # no turn rates
+    assert lab.loc[1, ["perched", "flapping", "circling", "gliding", "climbing_soar"]].isna().all()  # no GPS, no spectrum
+    assert lab.loc[2, "flapping"] == 1.0 and np.isnan(lab.loc[2, "night"]) and np.isnan(lab.loc[2, "perched"])

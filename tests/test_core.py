@@ -114,6 +114,44 @@ def test_kinematics_thermal_and_gap():
     assert np.isnan(k[k.run == k.run.max()]["climb_ms"].iloc[0])  # no rate across the gap
 
 
+@pytest.mark.parametrize(
+    "edit, nan_cols, expect_outlier",
+    [
+        ("jump", ["speed_track_ms", "step_m", "climb_ms"], True),  # 500 m position jump: > 70 m/s
+        ("speed_mismatch", ["speed_track_ms", "step_m"], True),  # track 10 m/s vs ground-speed 25 m/s
+        ("climb", ["climb_ms"], False),  # +60 m altitude step: climb > 20 m/s
+        ("half_second", ["turn_rate_dps"], False),  # fix 0.5 s after the previous one
+        ("duplicate", [], False),  # repeated timestamp: first kept, never dt = 0
+        ("slow", ["turn_rate_dps"], False),  # 1 m/s: steps under 5 m give no turn rate
+    ],
+)
+def test_kinematics_outliers(edit, nan_cols, expect_outlier):
+    a = _thermal(n=20)
+    a[gps.SPEED] = 10.0
+    i = 10
+    if edit == "jump":
+        a.loc[i, gps.LAT] += 500 / gps.EARTH_R * 180 / np.pi
+    elif edit == "speed_mismatch":
+        a[gps.SPEED] = 25.0
+    elif edit == "climb":
+        a.loc[i:, gps.ALT] += 60
+    elif edit == "half_second":
+        a.loc[i, "timestamp"] -= pd.Timedelta(seconds=0.5)
+    elif edit == "duplicate":
+        a = pd.concat([a, a.iloc[[i]].assign(**{gps.LAT: 45.0})]).reset_index(drop=True)
+    elif edit == "slow":
+        a = _thermal(n=20, v=1.0, radius=6.0)
+    k = gps.kinematics(a)
+    assert k["timestamp"].is_unique and (k["dt_s"].dropna() > 0).all()
+    assert k[gps.LAT].max() < 44.5  # duplicate kept the first fix
+    row = k.iloc[i] if edit != "slow" else k.iloc[1:]
+    for c in nan_cols:
+        assert np.isnan(np.asarray(row[c], dtype=float)).all(), c
+    assert bool(np.any(k["pos_outlier"])) == expect_outlier
+    assert (k["speed_track_ms"].dropna() <= gps.MAX_TRACK_SPEED_MS).all()
+    assert k["climb_ms"].dropna().between(gps.MIN_CLIMB_MS, gps.MAX_CLIMB_MS).all()
+
+
 
 def test_normalise_bird_and_compressed_ingest(tmp_path):
     """New-style "<animal>; <tag>" IDs are cut to the animal; a .zst export is read directly."""

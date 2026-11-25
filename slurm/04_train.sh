@@ -15,9 +15,10 @@ source "$HOME/opt/miniforge3/etc/profile.d/conda.sh"; conda activate aquilacl
 ROOT=/project/ai4wy-eap/nmille39/aquilacl
 : "${RUN:?set RUN to a run name}"
 DATA=${DATA:-$ROOT/data}
+WINDOWS=${WINDOWS:-$DATA/windows_10s}
 nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv
 echo "== train $RUN $(date)"
-python -m aquilacl.train --windows "$DATA/windows_10s" --run "$ROOT/runs/$RUN" "$@"
+python -m aquilacl.train --windows "$WINDOWS" --run "$ROOT/runs/$RUN" "$@"
 echo "== evaluate $RUN $(date)"
-python -m aquilacl.evaluate --run "$ROOT/runs/$RUN" --windows "$DATA/windows_10s" --events "$DATA/events"
+python -m aquilacl.evaluate --run "$ROOT/runs/$RUN" --windows "$WINDOWS" --events "$DATA/events" --device cuda
 echo "== done $(date)"

@@ -11,14 +11,14 @@
 set -euo pipefail
 source "$HOME/opt/miniforge3/etc/profile.d/conda.sh"; conda activate aquilacl
 ROOT=/project/ai4wy-eap/nmille39/aquilacl
-DATA=${DATA:-$ROOT/data}
-PROFILE=${PROFILE:-$DATA/profile_v2}
-RESULTS=${RESULTS:-$ROOT/results}
+# Usage: DATA=... PROFILE=... WINDOWS=<new dir> RESULTS=<results dir> sbatch 03_windows_baseline.sh
+: "${DATA:?set DATA}"; : "${PROFILE:?set PROFILE}"; : "${WINDOWS:?set WINDOWS to a new windows directory}"
+: "${RESULTS:?set RESULTS}"
 OLD=/project/ai4wy-eap/nmille39/GoldenEAI/logs/main/00030000_embeddings.csv
 echo "== windows $(date)"
-python -m aquilacl.windows "$DATA" --profile "$PROFILE" --out "$DATA/windows_10s" --workers $(( SLURM_CPUS_PER_TASK - 4 ))
+python -m aquilacl.windows "$DATA" --profile "$PROFILE" --out "$WINDOWS" --workers $(( SLURM_CPUS_PER_TASK - 4 ))
 echo "== baseline $(date)"
-python -m aquilacl.baseline "$DATA/windows_10s" --out "$RESULTS/baseline_v1"
+python -m aquilacl.baseline "$WINDOWS" --out "$RESULTS/baseline_v1"
 echo "== probes on old embeddings $(date)"
-python -m aquilacl.probes old --embeddings "$OLD" --windows "$DATA/windows_10s" --events "$DATA/events" --out "$RESULTS/probes_old"
+python -m aquilacl.probes old --embeddings "$OLD" --windows "$WINDOWS" --events "$DATA/events" --out "$RESULTS/probes_old"
 echo "== done $(date)"

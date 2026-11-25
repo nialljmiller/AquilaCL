@@ -50,18 +50,19 @@ def contiguous_crop(mask: torch.Tensor, min_len: int, p: float) -> torch.Tensor:
     return torch.where(do[:, None], mask & keep, mask)
 
 
-def burst_crop(acc: torch.Tensor, mask: torch.Tensor, lengths: tuple[int, ...], p: float):
+def burst_crop(acc: torch.Tensor, mask: torch.Tensor, lengths: torch.Tensor, p: float):
     """With probability p turn a window into what a short recording bout looks like.
 
-    Short bouts are single 40- or 64-sample bursts that always sit at the start of their window, while
-    continuous segments fill all 200 slots; a probe tells them apart at 0.998. Cutting one view of a long
-    window to a burst length and moving it to the window start teaches the encoder that both describe the
-    same behaviour, so states are not split by recording schedule.
+    Windows that are not full (a single 40-sample bout, the 64-sample tail of a 264-sample burst, a short run
+    of continuous-mode bursts) hold their samples from the window start, while continuous segments fill all
+    200 slots; a probe tells them apart at 0.998. Cutting one view of a full window to a length drawn from
+    ``lengths`` (the empirical lengths of non-full windows) and moving it to the window start teaches the
+    encoder that both describe the same behaviour, so states are not split by recording schedule.
     """
     B, T = mask.shape
     dev = mask.device
     n = mask.sum(1)
-    L = torch.tensor(lengths, device=dev)[torch.randint(len(lengths), (B,), device=dev)]
+    L = lengths.to(dev)[torch.randint(len(lengths), (B,), device=dev)]
     do = (torch.rand(B, device=dev) < p) & (n > L)
     first = torch.where(mask.any(1), mask.float().argmax(1), torch.zeros_like(n))
     start = first + (torch.rand(B, device=dev) * (n - L).clamp(min=0)).long()
@@ -73,11 +74,11 @@ def burst_crop(acc: torch.Tensor, mask: torch.Tensor, lengths: tuple[int, ...], 
     return torch.where(do[:, None, None], shifted_a, acc), torch.where(do[:, None], shifted_m, mask)
 
 
-def augment(acc, amask, gps, gmask, cfg) -> tuple:
+def augment(acc, amask, gps, gmask, cfg, short_lengths: torch.Tensor) -> tuple:
     B = acc.shape[0]
     dev = acc.device
     amask = contiguous_crop(amask, cfg.min_acc_samples, cfg.p_crop)
-    acc, amask = burst_crop(acc, amask, tuple(cfg.burst_lengths), cfg.p_burst_crop)
+    acc, amask = burst_crop(acc, amask, short_lengths, cfg.p_burst_crop)
     R = random_rotation(B, cfg.rot_deg, dev)
     scale = torch.empty(B, 1, 1, device=dev).uniform_(1 - cfg.scale, 1 + cfg.scale)
     acc = (acc.float() @ R.transpose(1, 2)) * scale + cfg.noise_g * torch.randn_like(acc, dtype=torch.float32)
@@ -133,14 +134,14 @@ def get_args(argv=None):
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--warmup", type=int, default=2000)
     ap.add_argument("--movement-power", type=float, default=0.5, help="window weight = clip(VeDBA)^power")
-    ap.add_argument("--neg-mask-windows", type=int, default=3, help="same bird+segment within this many windows are not negatives")
+    ap.add_argument("--neg-mask-s", type=float, default=1800.0, help="windows of the same bird within this many seconds are not negatives")
     ap.add_argument("--min-acc-samples", type=int, default=24)
     ap.add_argument("--p-crop", type=float, default=0.8)
-    ap.add_argument("--p-burst-crop", type=float, default=0.0, help="probability a view is cut to a short-burst length")
-    ap.add_argument("--burst-lengths", type=int, nargs="+", default=[40, 64], help="lengths of real short bouts")
-    ap.add_argument("--step-g", type=float, default=0.0, help="common acceleration step in g (0 = off), see dataset.common_format")
-    ap.add_argument("--clip-g", type=float, default=0.0, help="common acceleration range +-g (0 = off)")
-    ap.add_argument("--mask-gps-channels", nargs="*", default=[], help="GPS channels hidden from the model")
+    ap.add_argument("--p-burst-crop", type=float, default=0.3, help="probability a view is cut to the length of a real short window")
+    ap.add_argument("--step-g", default="auto", help="common acceleration step in g; 'auto' = <windows>/format.json, 0 = off")
+    ap.add_argument("--clip-g", default="auto", help="common acceleration range +-g; 'auto' = <windows>/format.json, 0 = off")
+    ap.add_argument("--mask-gps-channels", nargs="*", default=["eobs:horizontal-accuracy-estimate"],
+                    help="GPS channels hidden from the model (fix quality is not behaviour)")
     ap.add_argument("--rot-deg", type=float, default=15.0)
     ap.add_argument("--scale", type=float, default=0.1)
     ap.add_argument("--noise-g", type=float, default=0.01)
@@ -189,12 +190,43 @@ def embed(model, data, dev, out: Path):
         np.savez(out / f"{b}.npz", h=H[idx].astype(np.float16), z=Z[idx].astype(np.float16), row=idx)
 
 
+RUN_CONTROL = {"run", "steps", "embed_only", "device", "save_every"}  # may differ between resubmissions
+
+
+def resolve_format(cfg) -> None:
+    """Replace 'auto' step/clip by the values the windows stage recorded in <windows>/format.json."""
+    fmt_path = cfg.windows / "format.json"
+    for key in ("step_g", "clip_g"):
+        v = getattr(cfg, key)
+        if v == "auto":
+            if not fmt_path.exists():
+                raise SystemExit(f"{fmt_path} missing: pass --{key.replace('_', '-')} explicitly (0 = off)")
+            v = json.loads(fmt_path.read_text())[key]
+        setattr(cfg, key, float(v))
+
+
+def record_config(cfg) -> None:
+    """Write config.json for a new run; for an existing run refuse settings that differ from the stored ones."""
+    cur = {k: (v if isinstance(v, (int, float, list, bool)) else str(v)) for k, v in vars(cfg).items()}
+    path = cfg.run / "config.json"
+    if path.exists() and any(cfg.run.glob("ckpt_*.pt")):
+        old = json.loads(path.read_text())
+        diff = {k: (old.get(k), v) for k, v in cur.items() if k not in RUN_CONTROL and str(old.get(k)) != str(v)}
+        if diff:
+            raise SystemExit(f"{cfg.run} was trained with other settings (stored, given): {diff}")
+        return
+    path.write_text(json.dumps(cur, indent=1))
+
+
 def main(argv=None):
     cfg = get_args(argv)
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     cfg.run.mkdir(parents=True, exist_ok=True)
-    (cfg.run / "config.json").write_text(json.dumps({k: (v if isinstance(v, (int, float, list, bool)) else str(v)) for k, v in vars(cfg).items()}, indent=1))
+    resolve_format(cfg)
+    if cfg.embed_only and not any(cfg.run.glob("ckpt_*.pt")):
+        raise SystemExit(f"--embed-only but no checkpoint in {cfg.run}")
+    record_config(cfg)
     dev = cfg.device
 
     data = dataset.load(cfg.windows, step_g=cfg.step_g, clip_g=cfg.clip_g, mask_gps_channels=tuple(cfg.mask_gps_channels))
@@ -214,9 +246,13 @@ def main(argv=None):
     GM = torch.from_numpy(data.gps_mask[tr]).to(dev)
     meta_tr = data.meta.iloc[tr]
     bird_code = pd.factorize(meta_tr["bird"])[0]
-    seg = torch.from_numpy(meta_tr["segment"].to_numpy().copy()).to(dev)
-    kseg = torch.from_numpy(meta_tr["k_in_segment"].to_numpy().copy()).to(dev)
+    t0 = meta_tr["t_start"].min()
+    tsec = torch.from_numpy(((meta_tr["t_start"] - t0) / pd.Timedelta(seconds=1)).to_numpy(np.float64)).to(dev)
     bcode_t = torch.from_numpy(bird_code).to(dev)
+    n_acc = meta_tr["acc_samples"].to_numpy()
+    short = n_acc[(n_acc < 190) & (n_acc >= cfg.min_acc_samples)]
+    short_len = torch.from_numpy(np.random.default_rng(cfg.seed).choice(short, min(len(short), 100000), replace=False)
+                                 if len(short) else np.array([cfg.min_acc_samples])).long().to(dev)
     w = np.clip(meta_tr["vedba"].fillna(0.01).to_numpy(), 0.01, 2.0) ** cfg.movement_power
     sampler = BirdBatchSampler(bird_code, w, cfg.batch, cfg.birds_per_batch, cfg.seed)
 
@@ -241,17 +277,16 @@ def main(argv=None):
     while step < cfg.steps and not cfg.embed_only:
         i = torch.from_numpy(sampler()).to(dev)
         a, am, g, gm = A[i], AM[i], G[i], GM[i]
-        v0 = augment(a, am, g, gm, cfg)
-        v1 = augment(a, am, g, gm, cfg)
-        same = (bcode_t[i][:, None] == bcode_t[i][None]) & (seg[i][:, None] == seg[i][None]) & (
-            (kseg[i][:, None] - kseg[i][None]).abs() <= cfg.neg_mask_windows
-        )
+        v0 = augment(a, am, g, gm, cfg, short_len)
+        v1 = augment(a, am, g, gm, cfg, short_len)
+        same = (bcode_t[i][:, None] == bcode_t[i][None]) & ((tsec[i][:, None] - tsec[i][None]).abs() <= cfg.neg_mask_s)
         for gp in opt.param_groups:
             gp["lr"] = lr_at(step, cfg)
         with torch.autocast(dev.split(":")[0], dtype=torch.bfloat16, enabled=dev.startswith("cuda")):
             _, z0 = model(*v0)
             _, z1 = model(*v1)
-            loss = nt_xent(z0, z1, cfg.tau, same)
+        with torch.autocast(dev.split(":")[0], enabled=False):
+            loss = nt_xent(z0.float(), z1.float(), cfg.tau, same)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

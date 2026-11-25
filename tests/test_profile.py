@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -13,16 +15,69 @@ def _write(path, df):
     pq.write_table(pa.Table.from_pandas(df, preserve_index=False), path)
 
 
-def test_sensitivity_switch_is_split(tmp_path):
-    """A tag reconfigured to double sensitivity for some days gets two calibrations."""
-    rng = np.random.default_rng(3)
-    t = pd.Series(pd.date_range("2025-05-01", periods=30 * 24, freq="h"))
-    k_true = ((t.dt.day >= 10) & (t.dt.day < 20)).astype(int).to_numpy()
-    g = np.c_[np.zeros(len(t)), np.zeros(len(t)), np.ones(len(t))]
-    means = g * (512.0 * 2**k_true)[:, None] + 2048 + rng.normal(0, 1, (len(t), 3))
-    still = rng.random(len(t)) < 0.5
-    k = acc.sensitivity_regime(t, means, still)
-    assert (k == k_true).mean() > 0.97
+# (bird, tag, burst length, counts per g, quiet night bursts per day, true k, k source, calibration model)
+# 24- and 40-sample bursts interleave within the same nights at different settings; bird B2's 40-sample
+# group has too few quiet bursts, so it takes the k of the 40-sample groups of other birds (B1) and its
+# calibration is scaled from the tag's k=1 fit.
+GROUPS = [
+    ("B1", "5001", 24, 1024.0, 6, 1, "measured", None),
+    ("B1", "5001", 40, 512.0, 6, 0, "measured", None),
+    ("B2", "5002", 24, 1024.0, 6, 1, "measured", None),
+    ("B2", "5002", 40, 512.0, 1, 0, "length_majority", "scaled_from_k1"),
+]
+
+
+def test_sensitivity_per_burst_type(tmp_path):
+    rng = np.random.default_rng(5)
+    ev, days = tmp_path / "events", pd.date_range("2025-05-01", periods=10, freq="D")
+    rows, fixes = [], []
+    for bird, tag, n, cpg, per_night, *_ in GROUPS:
+        for d in days:
+            for h in range(5, 5 + per_night):  # local night (UTC-6), still, varied posture
+                th, ph = np.radians(rng.uniform(0, 90)), rng.uniform(0, 2 * np.pi)
+                gv = np.array([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)])
+                c = gv * cpg + OFFSET + rng.normal(0, 1.5, (n, 3))
+                rows.append((bird, tag, d + pd.Timedelta(hours=h, minutes=n), c))
+            for h in range(16, 20):  # daytime flapping
+                t = np.arange(n) / 20
+                gv = np.c_[np.zeros(n), np.zeros(n), 1 + 0.6 * np.sin(2 * np.pi * 2.5 * t)]
+                rows.append((bird, tag, d + pd.Timedelta(hours=h, minutes=n), gv * cpg + OFFSET))
+    for bird in {g[0] for g in GROUPS}:
+        f = pd.DataFrame([{"timestamp": d + pd.Timedelta(hours=h), gps.LON: -108.0, gps.LAT: 44.0, gps.SPEED: 12.0,
+                           gps.ALT: 1500.0} for d in days for h in range(14, 26)])
+        f["eobs:status"], f[gps.HACC], f["gps:satellite-count"] = "A", 3.0, 10.0
+        _write(ev / "gps" / f"{bird}.parquet", f)
+        r = sorted((x for x in rows if x[0] == bird), key=lambda x: x[2])
+        _write(ev / "acceleration" / f"{bird}.parquet", pd.DataFrame({
+            "timestamp": [x[2] for x in r], "tag-local-identifier": [x[1] for x in r],
+            "data-decoding-software": "21", "eobs:acceleration-sampling-frequency-per-axis": 20.0,
+            "eobs:accelerations-raw": [np.clip(x[3].round(), 0, 4095).astype("int16").ravel() for x in r]}))
+
+    profile.main([str(tmp_path), "--workers", "1"])
+    prof = tmp_path / "profile"
+    cal = pd.read_csv(prof / "calibration.csv", dtype={"tag": str}).set_index(["bird", "tag", "sensitivity_k"])
+    for bird, tag, n, cpg, _, k, source, model in GROUPS:
+        b = pd.read_parquet(prof / "acc" / f"{bird}.parquet")
+        b = b[b["n_samples"] == n]
+        assert (b["sensitivity_k"] == k).all() and (b["k_source"] == source).all()
+        assert np.abs(b.loc[b["still"], "static_norm"] - 1).max() < 0.02  # calibrated still |g|
+        c = cal.loc[(bird, tag, k)]
+        assert c["reliable"] and abs(c["median_still_g"] - 1) < 0.02
+        if model:
+            assert c["model"] == model
+            np.testing.assert_allclose(c[["gain_x", "gain_y", "gain_z"]].to_numpy(float),
+                                       cal.loc[(bird, tag, 1), ["gain_x", "gain_y", "gain_z"]].to_numpy(float) / 2)
+
+    # format.json: recomputed from calibration.csv, and close to the generating values
+    fmt = json.loads((prof / "format.json").read_text())
+    gain = cal[["gain_x", "gain_y", "gain_z"]].to_numpy(float)
+    off = cal[["offset_x", "offset_y", "offset_z"]].to_numpy(float)
+    k = cal.index.get_level_values("sensitivity_k").to_numpy()
+    step = (1 / gain[k == 0]).max()
+    clip = (np.minimum(off, 4095 - off) / gain)[k == 1].min() - 0.01
+    np.testing.assert_allclose([fmt["step_g"], fmt["clip_g"]], [step, clip], rtol=1e-12)
+    np.testing.assert_allclose([fmt["step_g"], fmt["clip_g"]], [1 / 512, OFFSET.min() / 1024 - 0.01], rtol=0.02)
+    assert len(fmt["step_g_periods"]) == 2 and len(fmt["clip_g_periods"]) == 2
 
 
 def test_profile_bird_end_to_end(tmp_path):

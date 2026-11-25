@@ -7,7 +7,7 @@
    refits on bird-bootstrap samples (compare with the handcrafted baseline, ARI 0.35-0.44).
 4. Invariance tests on held-out birds (needs the checkpoint): re-encode windows after changing only the
    recording format and count how often the k-means state stays the same.
-   - burst: a continuous 10 s window versus a 40- or 64-sample span of it moved to the window start (what a short bout records);
+   - burst: a full 10 s window versus a span of it as long as a real non-full window, moved to the window start;
    - sensitivity: a 1024 counts/g window re-gridded to 512 counts/g resolution, and a 512 counts/g window
      clipped to the narrower 1024 counts/g range.
    - GPS removed from daytime windows that have both sensors (which states acceleration alone can assign).
@@ -134,7 +134,7 @@ def _latest_model(run: Path, dev: str):
     return model
 
 
-def invariance_tests(run, windows, meta, H, hold, rng, dev, k=12, n=20000, range_1024_g=2.0, step_512_g=1 / 512) -> dict:
+def invariance_tests(run, windows, meta, H, hold, rng, dev, k=12, n=20000) -> dict:
     """Same-state rates after changing only the recording format of held-out windows (see module docstring).
 
     Format changes are applied in the sensor frame, then the run's own preparation (common format, rotation)
@@ -144,6 +144,8 @@ def invariance_tests(run, windows, meta, H, hold, rng, dev, k=12, n=20000, range
 
     cfg = json.loads((run / "config.json").read_text())
     step_g, clip_g = float(cfg.get("step_g", 0)), float(cfg.get("clip_g", 0))
+    fmt_path = windows / "format.json"
+    fmt = json.loads(fmt_path.read_text()) if fmt_path.exists() else {"step_g": 1 / 512, "clip_g": 1.9}
     model = _latest_model(run, dev)
     is_hold = meta["bird"].isin(hold).to_numpy()
     tr = sample_per_bird(meta, ~is_hold, 1000, rng)
@@ -171,10 +173,14 @@ def invariance_tests(run, windows, meta, H, hold, rng, dev, k=12, n=20000, range
     nxt = (seg[1:] == seg[:-1]) & (bird[1:] == bird[:-1])
     out["same_state_next_window"] = float((st[1:][nxt] == st[:-1][nxt]).mean())
 
-    # a long window versus one 40- or 64-sample burst of it, moved to the window start (as real short bouts)
-    long_ = np.flatnonzero(m["acc_samples"].to_numpy() >= 180)
+    # a full window versus a span as long as a real non-full window, moved to the window start
+    n_acc = meta["acc_samples"].to_numpy()
+    short_lengths = n_acc[(n_acc < 190) & (n_acc >= 24)]
+    if len(short_lengths) == 0:
+        short_lengths = np.array([40])  # no non-full windows in this data set (synthetic tests)
+    long_ = np.flatnonzero(m["acc_samples"].to_numpy() >= 190)
     sel = np.sort(rng.choice(long_, min(n, len(long_)), replace=False))
-    L = rng.choice([40, 64], len(sel))
+    L = rng.choice(short_lengths, len(sel))
     start = (rng.random(len(sel)) * (200 - L)).astype(int)
     t = np.arange(200)[None]
     src = np.minimum(start[:, None] + t, 199)
@@ -196,11 +202,14 @@ def invariance_tests(run, windows, meta, H, hold, rng, dev, k=12, n=20000, range
 
     kk = m["sensitivity_k"].to_numpy()
     swaps = [
-        ("k1_regridded_to_512", kk == 1, lambda a: np.round(a.astype(np.float32) / step_512_g) * step_512_g),
-        ("k0_clipped_to_1024_range", kk == 0, lambda a: np.clip(a.astype(np.float32), -range_1024_g, range_1024_g)),
+        ("k1_regridded_to_512", kk == 1, lambda a: np.round(a.astype(np.float32) / fmt["step_g"]) * fmt["step_g"]),
+        ("k0_clipped_to_1024_range", kk == 0, lambda a: np.clip(a.astype(np.float32), -fmt["clip_g"], fmt["clip_g"])),
     ]
     for name, rows, fn in swaps:
         rows = np.flatnonzero(rows)
+        if step_g > 0 or clip_g > 0:  # identical inputs by construction: see nuisance_vs_features instead
+            out[name + "_same_state"] = "not applicable (run uses the common format)"
+            continue
         if len(rows) < 50:
             out[name + "_same_state"] = None
             continue
@@ -285,7 +294,6 @@ def main(argv=None):
     ap.add_argument("--events", type=Path, required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
-    ap.add_argument("--range-1024-g", type=float, default=2.0, help="+-g range of the 1024 counts/g setting")
     args = ap.parse_args(argv)
     rng = np.random.default_rng(args.seed)
     meta, H = load_run(args.run, args.windows)
@@ -309,7 +317,7 @@ def main(argv=None):
     # 4. nuisance probes against the handcrafted-feature level
     res["nuisance_vs_features"] = nuisance_vs_features(meta, H, hold, rng)
     # 5. invariance to recording format
-    res["invariance"] = invariance_tests(args.run, args.windows, meta, H, hold, rng, args.device, range_1024_g=args.range_1024_g)
+    res["invariance"] = invariance_tests(args.run, args.windows, meta, H, hold, rng, args.device)
     (args.run / "evaluation.json").write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
 

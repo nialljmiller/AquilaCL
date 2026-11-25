@@ -16,6 +16,14 @@ LON, LAT = "location-long", "location-lat"
 ALT, SPEED, HEADING = "height-above-ellipsoid", "ground-speed", "heading"
 HACC = "eobs:horizontal-accuracy-estimate"
 
+# Kinematics plausibility limits (see ``kinematics``).
+MIN_TURN_STEP_M = 5.0  # below 5 m the bearing is dominated by position noise (turn rates > 90 deg/s at 0.5-2 m steps)
+MIN_TURN_DT_S = 1.0  # sub-second fix intervals give turn rates > 180 deg/s from a single bearing change
+MAX_TRACK_SPEED_MS = 70.0  # the tag's own ground-speed never exceeds 69.6 m/s; faster position steps are jumps
+MAX_SPEED_DIFF_MS = 10.0  # position-derived speed this far from the tag's ground-speed indicates a position error
+MAX_CLIMB_MS = 20.0  # sustained climb above 20 m/s is beyond any soaring or flapping climb: altitude error
+MIN_CLIMB_MS = -70.0  # dives may be fast, but not faster than the horizontal speed limit
+
 
 def good_fixes(df: pd.DataFrame, max_hacc_m: float = 25.0, min_sats: int = 4) -> pd.DataFrame:
     """Keep fixes with a position, a valid status and acceptable accuracy."""
@@ -41,9 +49,14 @@ def kinematics(df: pd.DataFrame, max_gap_s: float = 3.0) -> pd.DataFrame:
     Adds: run (id), dt_s, step_m, east_m/north_m (local tangent plane per
     run), speed_track_ms, climb_ms, bearing_deg, turn_rate_dps, and
     cum_turn_deg (signed cumulative turning within the run).
-    Rates are NaN for the first fix of each run.
+    Rates are NaN for the first fix of each run. Duplicate timestamps keep the
+    first fix. A step whose speed exceeds MAX_TRACK_SPEED_MS or differs from the
+    tag's ground-speed by more than MAX_SPEED_DIFF_MS is a position outlier
+    (``pos_outlier``): its step, speed, climb and bearing are NaN, so turn rates
+    using it are NaN too. Climb outside [MIN_CLIMB_MS, MAX_CLIMB_MS] is NaN.
+    Turn rate is NaN when either step is under MIN_TURN_STEP_M or dt < MIN_TURN_DT_S.
     """
-    d = df.sort_values("timestamp").reset_index(drop=True).copy()
+    d = df.sort_values("timestamp", kind="stable").drop_duplicates("timestamp", keep="first").reset_index(drop=True).copy()
     d["run"] = runs(d["timestamp"], max_gap_s)
     # Seconds since the first fix, independent of the datetime resolution.
     t = ((d["timestamp"] - d["timestamp"].iloc[0]) / pd.Timedelta(seconds=1)).to_numpy(dtype=float)
@@ -62,18 +75,24 @@ def kinematics(df: pd.DataFrame, max_gap_s: float = 3.0) -> pd.DataFrame:
     dz = np.r_[np.nan, np.diff(d[ALT].to_numpy(dtype=float))] if ALT in d else np.full(len(d), np.nan)
     dt[~same] = np.nan
     with np.errstate(invalid="ignore", divide="ignore"):
-        step = np.hypot(de, dn)
+        step = np.where(same, np.hypot(de, dn), np.nan)
+        speed = np.where(same & (dt > 0), step / dt, np.nan)
+        gs = d[SPEED].to_numpy(dtype=float) if SPEED in d else np.full(len(d), np.nan)
+        bad = (speed > MAX_TRACK_SPEED_MS) | (np.abs(speed - gs) > MAX_SPEED_DIFF_MS)  # NaN compares False
+        climb = np.where(same & (dt > 0) & ~bad, dz / dt, np.nan)
+        climb[(climb > MAX_CLIMB_MS) | (climb < MIN_CLIMB_MS)] = np.nan
         d["dt_s"] = dt
-        d["step_m"] = np.where(same, step, np.nan)
-        d["speed_track_ms"] = np.where(same & (dt > 0), step / dt, np.nan)
-        d["climb_ms"] = np.where(same & (dt > 0), dz / dt, np.nan)
+        d["pos_outlier"] = bad
+        d["step_m"] = np.where(bad, np.nan, step)
+        d["speed_track_ms"] = np.where(bad, np.nan, speed)
+        d["climb_ms"] = climb
         bearing = np.degrees(np.arctan2(de, dn)) % 360
-        bearing[~same | (step < 0.5)] = np.nan
+        bearing[~same | bad | ~(step >= MIN_TURN_STEP_M)] = np.nan
         d["bearing_deg"] = bearing
         dturn = (np.r_[np.nan, np.diff(bearing)] + 180) % 360 - 180
         prev_same = np.r_[False, same[1:] & same[:-1]]
         dturn[~prev_same] = np.nan
-        d["turn_rate_dps"] = np.where(dt > 0, dturn / dt, np.nan)
+        d["turn_rate_dps"] = np.where(dt >= MIN_TURN_DT_S, dturn / dt, np.nan)
     d["cum_turn_deg"] = pd.Series(np.nan_to_num(dturn)).groupby(run).cumsum().to_numpy()
     return d
 

@@ -99,7 +99,7 @@ def run(windows: Path, out: Path, k_range=range(4, 17), per_bird: int = 3000, n_
 
     rows = np.flatnonzero(ok)
     log_emit = np.full((len(df), k_best), np.nan)
-    log_emit[rows] = gmm._estimate_weighted_log_prob(Z[rows])
+    log_emit[rows] = gmm._estimate_log_prob(Z[rows])  # p(x|state); state frequencies enter only via log_pi and T
     post = np.exp(log_emit[rows] - logsumexp(log_emit[rows], axis=1, keepdims=True))
     df["state_gmm"] = -1
     df.loc[rows, "state_gmm"] = post.argmax(axis=1)

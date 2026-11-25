@@ -92,7 +92,7 @@ def nt_xent(z0: torch.Tensor, z1: torch.Tensor, tau: float, extra_mask: torch.Te
     behaviour: same bird and segment within a few windows); it is applied to all four view combinations.
     """
     B = z0.shape[0]
-    z = F.normalize(torch.cat([z0, z1]), dim=1)
+    z = F.normalize(torch.cat([z0, z1]).float(), dim=1)  # call outside autocast: similarities in float32
     sim = (z @ z.T).float() / tau
     eye = torch.eye(2 * B, dtype=torch.bool, device=z.device)
     sim = sim.masked_fill(eye, float("-inf"))

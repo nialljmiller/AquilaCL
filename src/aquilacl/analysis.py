@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import importlib
 import json
 import shutil
 from pathlib import Path
@@ -71,8 +72,9 @@ FIRST_DRAFT = [
     ("bird_profiles.png", "per-bird state budget", "m6_bird_budgets.png, m6_bird_budgets.csv"),
     ("pop_diversity.png, age_diversity.png", "how variable are birds?", "m6_bird_diversity.png, m6_bird_summary.csv"),
     ("pop_sex.png, sex_umap.png", "do sexes separate in latent space?", "m2_embedding_map.png (sex panel)"),
-    ("anomaly.png", "unusual windows", "m7_outliers.png, m7_outliers.csv, m7_rare_states.png"),
-    ("temporal_doy.png, behaviour_seasonal.png", "seasonal change", "m5_seasonal.png"),
+    ("anomaly.png", "unusual windows", "m7_outliers.png, m7_outliers.csv, m7_rare_states.png, m7_outlier_factors.csv"),
+    ("temporal_doy.png, behaviour_seasonal.png", "seasonal change",
+     "m5_seasonal.png, m5_seasonal_by_mode.png, m5_seasonal_by_mode.csv"),
     ("temporal_diel.png, behaviour_diel.png", "diel rhythm", "m5_diel_solar_hour.png, m5_diel_sun_elevation.png"),
     ("per_bird/bird_<id>.png", "single-bird deep dive", "m6_calendar.png, m6_bird_budgets.png (one row per bird)"),
     ("sex_features.png, sex_cluster_usage.png", "do sexes differ in state use?", "m6_group_sex.png, m6_group_tests.csv"),
@@ -91,6 +93,16 @@ FIRST_DRAFT = [
     ("gp_features*.csv", "GP hyperparameters per window", "not covered: unused by any first-draft analysis and "
      "invalid (inventory §2); no GP features exist in this pipeline"),
 ]
+# With age from aquilacl.reference, the age rows of FIRST_DRAFT point to these outputs instead.
+AGE_FIRST_DRAFT = {
+    "age_umap.png, age_features.png, age_clusters.png, age_heatmap.png":
+        "m6_group_tagged_young.png, m6_group_tests.csv (descriptive: tagged young vs age not stated)",
+    "age_trajectory.png, age_seasonal.png, age_diel.png":
+        "m6_development.png, m6_development.csv, m6_age_y1_vs_y2.png, m6_age_y1_vs_y2.csv, "
+        "m6_age_y1_vs_y2_summary.csv",
+    "age_features_window.png": "m6_group_tagged_young.png (bird level)",
+}
+DAYS_PER_MONTH = 30.44
 
 
 class Outputs:
@@ -124,13 +136,13 @@ class Outputs:
             parts.append(tok if ok else f"{tok} [not produced in this run, see notes]")
         return ", ".join(parts)
 
-    def write_index(self, header: list[str]) -> None:
+    def write_index(self, header: list[str], first_draft: list | None = None) -> None:
         lines = ["# aquilacl stage 5b analysis", "", *header, "", "## Outputs", "",
                  "| File | Module | Question |", "|---|---|---|"]
         lines += [f"| [{n}]({n}) | {m} | {q} |" for n, m, q in self.items]
         lines += ["", "## First-draft plots and where their questions are answered", "",
                   "| First-draft output | Question | Answered by |", "|---|---|---|"]
-        lines += [f"| {a} | {q} | {self.answered(b)} |" for a, q, b in FIRST_DRAFT]
+        lines += [f"| {a} | {q} | {self.answered(b)} |" for a, q, b in (first_draft or FIRST_DRAFT)]
         lines += ["", "## Notes", ""] + [f"- {n}" for n in self.notes]
         (self.root / "index.md").write_text("\n".join(lines) + "\n")
 
@@ -208,7 +220,8 @@ def load_windows(states_dir: Path, windows: Path, out: Outputs, state_col: str =
     return df
 
 
-def load_reference(path: Path, birds: list[str], out: Outputs) -> tuple[pd.DataFrame, pd.DataFrame]:
+def load_reference(path: Path, birds: list[str], out: Outputs, age_source: bool = False
+                   ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Per-bird sex, life stage and deployment date from the reference CSV, never invented.
 
     Only the columns in REF_FIELDS are read. Several deployments of one animal: a field with conflicting values is
@@ -254,10 +267,87 @@ def load_reference(path: Path, birds: list[str], out: Outputs) -> tuple[pd.DataF
     if unmatched:
         out.note(f"{len(unmatched)} of {len(birds)} birds have no row in the reference CSV (matched on "
                  f"'{cols['id']}'); their metadata are reported as missing")
-    if cols["life_stage"] is None:
+    if cols["life_stage"] is None and not age_source:
         out.note("the reference CSV has no life-stage column; life stage is not inferred from comments, dates or "
                  "movement, so no life-stage comparison is made")
     return meta, cov
+
+
+AGE_FIELDS = ["bird", "sex", "tagged_young", "hatch_year", "deploy_on", "migrant"]  # the reference columns used here
+
+
+def load_age(path: Path, birds: list[str], out: Outputs):
+    """Per-bird age fields from ``aquilacl.reference`` (load_birds / age_on), or (None, None) when that module
+    cannot be imported (then age is not used, as before it existed). Only AGE_FIELDS are kept; free-text fields
+    such as ``young_term`` and the tag columns are never carried into outputs."""
+    try:
+        reference = importlib.import_module(".reference", __package__ or "aquilacl")
+    except ImportError as e:
+        out.note(f"aquilacl.reference could not be imported ({type(e).__name__}); age is not used and the "
+                 "life-stage outputs fall back to the reference CSV's life-stage column")
+        return None, None
+    ref = reference.load_birds(path, birds)
+    ref = ref.assign(bird=ref["bird"].astype(str)).drop_duplicates("bird").set_index("bird", drop=False)
+    ref = ref[[c for c in AGE_FIELDS if c in ref]].reindex(birds)
+    ref["bird"] = ref.index
+    return reference, ref
+
+
+def flag_label(v, yes: str, no: str) -> str:
+    """True / False / missing -> yes / no / "not stated" (NaN is never read as True)."""
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return "not stated"
+    if isinstance(v, (bool, np.bool_, int, np.integer, float)) and v in (True, 1):
+        return yes
+    if isinstance(v, (bool, np.bool_, int, np.integer, float)) and v in (False, 0):
+        return no
+    return "not stated"
+
+
+def call_age_on(reference, row: pd.Series, ts: pd.Series, fledge=None) -> tuple[np.ndarray, np.ndarray]:
+    """reference.age_on as (age_days, age_class); accepts a returned tuple or a DataFrame with those columns."""
+    r = reference.age_on(row, ts) if fledge is None else reference.age_on(row, ts, fledge=fledge)
+    d, c = (r["age_days"], r["age_class"]) if isinstance(r, pd.DataFrame) else r
+    return np.asarray(d, float), np.asarray(c, object)
+
+
+def window_age(df: pd.DataFrame, ref: pd.DataFrame, reference) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
+    """Age in days and age class of every window, from reference.age_on per bird (tz-aware UTC timestamps).
+
+    When the module has ``fledge_from_speed``, each tagged-young bird's fledge date comes from it (on the bird's
+    window times and speed_mean) and is passed to age_on. Returns (age_days, age_class, per-bird fledge table)."""
+    age = np.full(len(df), np.nan)
+    cls = np.full(len(df), "not_stated", dtype=object)
+    fl = []
+    use_speed = hasattr(reference, "fledge_from_speed") and "speed_mean" in df
+    for b, ix in df.groupby("bird", observed=True).indices.items():
+        if str(b) not in ref.index:
+            continue
+        row = ref.loc[str(b)]
+        ts = df["t_start"].iloc[ix].reset_index(drop=True)
+        fledge = None
+        if use_speed and flag_label(row.get("tagged_young"), "y", "n") == "y" and pd.notna(row.get("hatch_year")):
+            r = reference.fledge_from_speed(ts, df["speed_mean"].iloc[ix].to_numpy(float), row["hatch_year"])
+            fledge = r["fledge"]
+            fl.append({"bird": str(b), "fledge": fledge, "fledge_source": r.get("fledge_source"),
+                       "fledge_is_first_data_day": r.get("fledge_is_first_data_day")})
+        age[ix], cls[ix] = call_age_on(reference, row, ts, fledge)
+    return age, cls, pd.DataFrame(fl, columns=["bird", "fledge", "fledge_source", "fledge_is_first_data_day"])
+
+
+def fledge_age_days(reference, row: pd.Series, first_window: pd.Timestamp) -> float:
+    """Age (days) at which reference.age_on changes from pre_fledge to juvenile_y1 for this bird.
+
+    age_on is evaluated daily over two years from 1 January of the hatch year (or from 400 days before the
+    bird's first window when no hatch year is given). NaN when no pre_fledge -> juvenile_y1 change is seen."""
+    hy = row.get("hatch_year")
+    start = (pd.Timestamp(year=int(hy), month=1, day=1, tz="UTC") if pd.notna(hy)
+             else (first_window - pd.Timedelta(days=400)).floor("D"))
+    d, c = call_age_on(reference, row, pd.Series(pd.date_range(start, periods=731, freq="D")))
+    juv = (c == "juvenile_y1") & np.isfinite(d)
+    if not (c == "pre_fledge").any() or not juv.any():
+        return np.nan
+    return float(d[juv].min())
 
 
 def load_h(run: Path, picks: pd.DataFrame) -> np.ndarray:
@@ -723,6 +813,149 @@ def fig_dwell(runs: pd.DataFrame, states: list, colours: dict):
     return fig
 
 
+MODE_K = {1: "k=1", 0: "k=0"}  # sensitivity setting = recording mode (k=1: continuous, always with GPS)
+
+
+def seasonal_by_mode(df: pd.DataFrame, states: list) -> tuple[pd.DataFrame, dict]:
+    """Bird-weighted state share per calendar month (UTC, years pooled), raw and stratified by recording mode
+    (sensitivity_k 1 vs 0), by GPS present/absent and by both; plus a mode-adjusted share.
+
+    Mode-adjusted: within each month, the k=0 and k=1 shares are combined with fixed weights, the bird-weighted
+    overall mode mix (mean over birds of the bird's share of k=1 windows, among its k=0/k=1 windows). A month
+    without a share for both modes gets NaN, never a fill. Returns (long table, mode weights)."""
+    d = df.assign(cal_month=df["t_start"].dt.month,
+                  mode=df["sensitivity_k"].map(MODE_K),
+                  gps=np.where(df["gps_fixes"] > 0, "GPS", "no GPS"))
+    d["mode_gps"] = d["mode"] + ", " + d["gps"]
+    rows = []
+
+    def add(strat, stratum, sub):
+        share, nb, nw = bird_share(sub, "cal_month", states)
+        t = share.add_prefix("share_state_")
+        t["n_birds"], t["n_windows"] = nb, nw.reindex(t.index)
+        rows.append(t.reset_index().rename(columns={"cal_month": "month"}).assign(stratification=strat,
+                                                                                    stratum=stratum))
+        return share, nb
+
+    add("all", "all windows", d)
+    per = {}
+    for col in ("mode", "gps", "mode_gps"):
+        for v in sorted(d[col].dropna().unique()):
+            per[v] = add(col, v, d[d[col] == v])
+    km = d[d["mode"].notna()]
+    k1 = km.groupby("bird", observed=True)["mode"].apply(lambda s: (s == "k=1").mean())
+    w = {"k=1": float(k1.mean()) if len(k1) else np.nan}
+    w["k=0"] = 1 - w["k=1"]
+    if "k=0" in per and "k=1" in per:
+        s0, s1 = per["k=0"][0], per["k=1"][0]
+        months = s0.index.union(s1.index)
+        adj = s0.reindex(months) * w["k=0"] + s1.reindex(months) * w["k=1"]  # NaN where a mode is missing
+        t = adj.add_prefix("share_state_")
+        t["n_birds"] = np.minimum(per["k=0"][1].reindex(months), per["k=1"][1].reindex(months))
+        t["n_windows"] = km.groupby("cal_month").size().reindex(months)
+        rows.append(t.rename_axis("month").reset_index().assign(stratification="mode_adjusted",
+                                                                 stratum="mode-adjusted"))
+    tab = pd.concat(rows, ignore_index=True)
+    first = ["stratification", "stratum", "month", "n_birds", "n_windows"]
+    return tab[first + [c for c in tab.columns if c not in first]], w
+
+
+def seasonal_mode_contrast(tab: pd.DataFrame, states: list) -> pd.DataFrame:
+    """Per state: mean monthly share in the months where k=1 has a share minus the mean in the other months, for
+    all windows and within k=0 only. A contrast that keeps its sign within k=0 is not only the recording schedule."""
+    k1 = tab.loc[(tab["stratum"] == "k=1") & tab.filter(like="share_state_").notna().any(axis=1), "month"]
+    k1 = set(k1.astype(int))
+    rows = []
+    for s in states:
+        r = {"state": s, "k1_months": " ".join(str(m) for m in sorted(k1))}
+        for name, stratum in (("all", "all windows"), ("within_k0", "k=0")):
+            t = tab[tab["stratum"] == stratum].dropna(subset=[f"share_state_{s}"])
+            a, b = t[t["month"].isin(k1)], t[~t["month"].isin(k1)]
+            r[f"contrast_{name}"] = (a[f"share_state_{s}"].mean() - b[f"share_state_{s}"].mean()
+                                     if len(a) and len(b) else np.nan)
+            r[f"months_in_{name}"], r[f"months_out_{name}"] = len(a), len(b)
+        r["same_sign_within_k0"] = (bool(np.sign(r["contrast_all"]) == np.sign(r["contrast_within_k0"]))
+                                    if np.isfinite(r["contrast_all"]) and np.isfinite(r["contrast_within_k0"])
+                                    else np.nan)
+        rows.append(r)
+    return pd.DataFrame(rows)
+
+
+def seasonal_mode_note(tab: pd.DataFrame, df: pd.DataFrame, states: list, w: dict,
+                       contrast: pd.DataFrame | None = None) -> list[str]:
+    """Seasonal range (max - min over months with a share) per state, raw vs within one mode vs mode-adjusted."""
+    def rng_of(stratum, s):
+        v = tab.loc[tab["stratum"] == stratum, f"share_state_{s}"].dropna()
+        return (f"{v.max() - v.min():.2f} ({len(v)} mo)") if len(v) else "n/a"
+
+    cols = ["all windows", "k=0", "k=1", "mode-adjusted"]
+    parts = [f"state {s}: " + ", ".join(f"{c} {rng_of(c, s)}" for c in cols) for s in states]
+    notes = ["m5_seasonal_by_mode: seasonal range of the bird-weighted monthly state share (max - min over the "
+             "calendar months with a share; months in brackets), raw / within k=0 only / within k=1 only / "
+             f"mode-adjusted (fixed mix k=1 {w.get('k=1', np.nan):.2f}). A seasonal difference that also appears "
+             "within k=0 (which covers the whole year) is not explained by the recording schedule alone; one seen "
+             "only in the raw shares can be the April-August concentration of k=1. " + "; ".join(parts)]
+    if contrast is not None and contrast["contrast_all"].notna().any():
+        c = contrast
+        notes.append(
+            f"m5_seasonal_by_mode_contrast: mean monthly share in the months where k=1 has a share "
+            f"({c['k1_months'].iat[0]}) minus the other months, all windows vs within k=0 only; a contrast that keeps "
+            "its sign within k=0 is not only the recording schedule. " + "; ".join(
+                f"state {r.state}: all {r.contrast_all:+.3f}, within k=0 {r.contrast_within_k0:+.3f} ("
+                + ("same sign" if r.same_sign_within_k0 is True else "sign differs" if r.same_sign_within_k0 is False
+                   else "n/a") + ")" for r in c.itertuples()))
+    elif contrast is not None:
+        notes.append("m5_seasonal_by_mode_contrast: no contrast (k=1 has a share in no month or in every month)")
+    adj = tab[tab["stratum"] == "mode-adjusted"]
+    nan_m = sorted(adj.loc[adj.filter(like="share_state_").isna().all(axis=1), "month"].astype(int).tolist())
+    all_m = sorted(tab.loc[tab["stratum"] == "all windows", "month"].astype(int).tolist())
+    missing = [m for m in all_m if m not in set(adj.loc[adj.filter(like="share_state_").notna().any(axis=1),
+                                                         "month"].astype(int))]
+    if missing or nan_m:
+        notes.append(f"m5_seasonal_by_mode: no mode-adjusted share in months {sorted(set(missing) | set(nan_m))} "
+                     "(one mode has no bird with enough windows there); left empty, not filled")
+    k0g = df[(df["sensitivity_k"] == 0) & (df["gps_fixes"] > 0)]
+    if len(k0g):
+        short = float((k0g["regime"] == "non-full").mean())
+        notes.append(f"m5_seasonal_by_mode: {len(k0g)} k=0 windows have GPS; {short:.1%} of them are non-full "
+                     "(short) windows" + (", so the 'k=0, GPS' stratum is mostly short windows" if short > 0.5 else ""))
+    return notes
+
+
+def fig_seasonal_by_mode(tab: pd.DataFrame, states: list, colours: dict):
+    """One panel per stratum: monthly bird-weighted state shares (lines) and birds per month (grey bars)."""
+    panels = list(dict.fromkeys(tab["stratum"]))
+    panels = [p for p in ["all windows", "mode-adjusted"] if p in panels] + \
+             [p for p in panels if p not in ("all windows", "mode-adjusted")]
+    nc = 4
+    nr = int(np.ceil(len(panels) / nc))
+    fig, axes = plt.subplots(nr, nc, figsize=(4.2 * nc, 3.3 * nr), squeeze=False, sharex=True, sharey=True)
+    for ax, p in zip(axes.ravel(), panels):
+        t = tab[tab["stratum"] == p].set_index("month").reindex(range(1, 13)).reset_index()  # gaps break lines
+        tw = ax.twinx()
+        tw.bar(t["month"], t["n_birds"].fillna(0), color="0.88", width=0.8, zorder=0)
+        tw.set_ylim(0, max(tab["n_birds"].max() if tab["n_birds"].notna().any() else 1, 1) * 3)
+        tw.tick_params(labelsize=6, colors="0.5")
+        ax.set_zorder(tw.get_zorder() + 1)
+        ax.patch.set_visible(False)
+        for s in states:
+            ax.plot(t["month"], t[f"share_state_{s}"], "o-", ms=2.5, lw=1, color=colours[s], label=f"state {s}")
+        ax.set_title(p, fontsize=9)
+        ax.set_xticks(range(1, 13))
+        ax.set_xlim(0.5, 12.5)
+        ax.set_ylim(0, 1)
+    for ax in axes.ravel()[len(panels):]:
+        ax.axis("off")
+    for ax in axes[:, 0]:
+        ax.set_ylabel("bird-weighted state share")
+    for ax in axes[-1]:
+        ax.set_xlabel("calendar month (UTC, years pooled)")
+    axes[0, 0].legend(fontsize=6, ncol=2)
+    fig.suptitle("monthly state use by recording mode (k=1 continuous, k=0 burst) and GPS; grey bars = birds in "
+                 "the share (right axis); mode-adjusted = fixed overall mode mix within each month", fontsize=9)
+    return fig
+
+
 # ---------------------------------------------------------------- M6 individuals
 
 
@@ -829,10 +1062,13 @@ def permutation_test(budget: pd.DataFrame, groups: pd.Series, states: list, n_pe
     return pd.DataFrame(rows)
 
 
-def group_tests(budget, meta, states, n_perm, rng, out: Outputs, colours):
+def group_tests(budget, meta, states, n_perm, rng, out: Outputs, colours, fields=("sex", "life_stage"),
+                descriptive: dict | None = None):
+    """Bird-level permutation tests per field; ``descriptive`` fields get their caveat in the status column."""
     rows = []
+    descriptive = descriptive or {}
     b = budget[budget["windows"] >= MIN_BIRD_WINDOWS].join(meta.set_index("bird"))
-    for field in ("sex", "life_stage"):
+    for field in fields:
         g = b[field].dropna()
         counts = g.value_counts()
         keep = counts[counts >= 2].index
@@ -846,10 +1082,124 @@ def group_tests(budget, meta, states, n_perm, rng, out: Outputs, colours):
             continue
         sub = b[b[field].isin(keep)]
         t = permutation_test(sub, sub[field], states, n_perm, rng)
-        rows += [{**base, **r, "status": f"tested, {len(sub)} birds, {n_perm} permutations"} for r in t.to_dict("records")]
-        out.fig(fig_group(sub, field, states, colours), f"m6_group_{field}.png", "M6",
-                f"does per-bird state use differ by {field.replace('_', ' ')}? (bird level, n per group in legend)")
+        status = f"tested, {len(sub)} birds, {n_perm} permutations"
+        if field in descriptive:
+            status = f"{status}; descriptive only: {descriptive[field]}"
+        rows += [{**base, **r, "status": status} for r in t.to_dict("records")]
+        q = (f"does per-bird state use differ by {field.replace('_', ' ')}? (bird level, n per group in legend)"
+             + (f"; descriptive only: {descriptive[field]}" if field in descriptive else ""))
+        out.fig(fig_group(sub, field, states, colours), f"m6_group_{field}.png", "M6", q)
     return pd.DataFrame(rows)
+
+
+def development_table(df: pd.DataFrame, ref: pd.DataFrame, reference, states: list, out: Outputs,
+                      fledges: pd.DataFrame | None = None):
+    """Windows of tagged-young birds outside pre_fledge, with months since fledging (or months of age when the
+    fledging age cannot be read from reference.age_on). Returns (windows with ``dev_month``, x-axis label).
+
+    Fledging: the per-bird fledge dates of window_age when the reference module supplied them; otherwise the age
+    at which age_on first gives juvenile_y1 (fledge_age_days)."""
+    young = set(ref.index[ref["tagged_young"].eq(True)])
+    sub = df[df["bird"].astype(str).isin(young) & (df["age_class"] != "pre_fledge") & df["age_days"].notna()].copy()
+    if not len(sub):
+        return sub, None
+    if fledges is not None and len(fledges) and fledges["fledge"].notna().all() \
+            and set(sub["bird"].astype(str)) <= set(fledges["bird"]):
+        f = pd.to_datetime(sub["bird"].astype(str).map(fledges.set_index("bird")["fledge"]), utc=True)
+        src = fledges["fledge_source"].value_counts().to_dict()
+        out.note(f"m6_development: fledge dates from aquilacl.reference.fledge_from_speed, by source {src}; "
+                 f"{int(fledges['fledge_is_first_data_day'].eq(True).sum())} of them are the "
+                 "bird's first day of data (an upper bound)")
+        sub["dev_month"] = np.floor((sub["t_start"] - f).dt.total_seconds() / 86400 / DAYS_PER_MONTH)
+        sub = sub[sub["dev_month"] >= 0]
+        sub["group"] = "tagged young"
+        return sub, "months since fledging"
+    first = sub.groupby("bird", observed=True)["t_start"].min()
+    fl = pd.Series({str(b): fledge_age_days(reference, ref.loc[str(b)], t) for b, t in first.items()})
+    if fl.notna().any():
+        if fl.isna().any():
+            out.note(f"m6_development: {int(fl.isna().sum())} of {len(fl)} tagged-young birds left out: "
+                     "reference.age_on shows no pre_fledge -> juvenile_y1 change for them, so no fledging age")
+        sub = sub[sub["bird"].astype(str).isin(fl.index[fl.notna()])]
+        x = (sub["age_days"] - sub["bird"].astype(str).map(fl).astype(float)) / DAYS_PER_MONTH
+        label = "months since fledging"
+    else:
+        out.note("m6_development: reference.age_on shows no pre_fledge -> juvenile_y1 change for any tagged-young "
+                 "bird, so the x axis is months of age (from age_days), not months since fledging")
+        x = sub["age_days"] / DAYS_PER_MONTH
+        label = "months of age"
+    sub["dev_month"] = np.floor(x)
+    sub = sub[sub["dev_month"] >= 0]
+    sub["group"] = "tagged young"
+    return sub, label
+
+
+def y1_vs_y2(df: pd.DataFrame, ref: pd.DataFrame, states: list, n_perm: int, rng):
+    """Same calendar month, first year (juvenile_y1) vs second year (y2), per tagged-young bird.
+
+    A (bird, month) pair needs >= MIN_BIN_WINDOWS windows in each year. Differences (y2 - y1) are averaged within
+    each bird first, so each bird counts once in the sign-flip test. The k=1 and GPS shares of each side are
+    reported, because the recording mode can differ between the two years. Returns (pairs, summary)."""
+    young = set(ref.index[ref["tagged_young"].eq(True)])
+    sub = df[df["bird"].astype(str).isin(young) & df["age_class"].isin(["juvenile_y1", "y2"])]
+    sub = sub.assign(cal_month=sub["t_start"].dt.month, year_of_life=sub["age_class"].map(
+        {"juvenile_y1": "y1", "y2": "y2"}), k1=(sub["sensitivity_k"] == 1).astype(float),
+        gps=(sub["gps_fixes"] > 0).astype(float), bird=sub["bird"].astype(str))
+    keys = ["bird", "cal_month", "year_of_life"]
+    c = sub.groupby(keys + ["state"]).size().unstack("state", fill_value=0).reindex(columns=states, fill_value=0)
+    n = c.sum(axis=1)
+    t = c.div(n, axis=0).add_prefix("share_state_")
+    t["windows"] = n
+    t["k1_share"] = sub.groupby(keys)["k1"].mean()
+    t["gps_share"] = sub.groupby(keys)["gps"].mean()
+    t = t[t["windows"] >= MIN_BIN_WINDOWS].unstack("year_of_life")
+    if not len(t) or "y1" not in t.columns.get_level_values(1) or "y2" not in t.columns.get_level_values(1):
+        return pd.DataFrame(), pd.DataFrame()
+    t = t.dropna(subset=[(f"share_state_{states[0]}", "y1"), (f"share_state_{states[0]}", "y2")])
+    if not len(t):
+        return pd.DataFrame(), pd.DataFrame()
+    t.columns = [f"{a}_{b}" for a, b in t.columns]
+    pairs = t.reset_index().rename(columns={"cal_month": "month"})
+    for s in states:
+        pairs[f"diff_state_{s}"] = pairs[f"share_state_{s}_y2"] - pairs[f"share_state_{s}_y1"]
+    per_bird = pairs.groupby("bird")[[c for c in pairs if c.startswith(("share_state_", "diff_state_"))]].mean()
+    D = per_bird[[f"diff_state_{s}" for s in states]].to_numpy(float)
+    nb = len(D)
+    if 2 ** nb <= n_perm:  # few birds: all sign patterns (exact)
+        signs = 1.0 - 2.0 * ((np.arange(2 ** nb)[:, None] >> np.arange(nb)) & 1)
+        n_perm, how = len(signs), "all sign patterns (exact)"
+    else:
+        signs, how = rng.choice([-1.0, 1.0], size=(n_perm, nb)), "random sign flips"
+    null = np.abs(signs @ D) / nb
+    obs = np.abs(D.mean(0))
+    hits = (null >= obs - 1e-12).sum(0)
+    p = hits / n_perm if how.endswith("(exact)") else (1 + hits) / (1 + n_perm)  # exact set includes the observed
+    summ = pd.DataFrame({"state": states, "birds": nb, "bird_months": len(pairs),
+                         "mean_share_y1": [per_bird[f"share_state_{s}_y1"].mean() for s in states],
+                         "mean_share_y2": [per_bird[f"share_state_{s}_y2"].mean() for s in states],
+                         "mean_diff_y2_minus_y1": D.mean(0), "p_sign_flip": p,
+                         "mean_k1_share_y1": pairs["k1_share_y1"].mean(), "mean_k1_share_y2": pairs["k1_share_y2"].mean(),
+                         "mean_gps_share_y1": pairs["gps_share_y1"].mean(),
+                         "mean_gps_share_y2": pairs["gps_share_y2"].mean(),
+                         "status": f"{nb} birds, {n_perm} {how}, bird-level (pairs averaged within bird)"})
+    return pairs, summ
+
+
+def fig_y1_vs_y2(pairs: pd.DataFrame, summ: pd.DataFrame, states: list, colours: dict):
+    pb = pairs.groupby("bird")[[c for c in pairs if c.startswith("share_state_")]].mean()
+    fig, axes = plt.subplots(1, len(states), figsize=(1.9 * len(states) + 1, 3.4), sharey=True, squeeze=False,
+                             layout="constrained")
+    for ax, s, (_, r) in zip(axes[0], states, summ.iterrows()):
+        for _, b in pb.iterrows():
+            ax.plot([0, 1], [b[f"share_state_{s}_y1"], b[f"share_state_{s}_y2"]], "-o", ms=3, lw=0.8,
+                    color=colours[s], alpha=0.7)
+        ax.set_xticks([0, 1], ["year 1", "year 2"], fontsize=7)
+        ax.set_xlim(-0.3, 1.3)
+        ax.set_title(f"state {s}\np = {r['p_sign_flip']:.3g}", fontsize=8)
+    axes[0, 0].set_ylabel("share in matched calendar months")
+    fig.suptitle(f"tagged-young birds, same calendar months in year 1 and year 2\n({int(summ['birds'].iat[0])} birds, "
+                 f"{int(summ['bird_months'].iat[0])} bird-months; one line per bird)", fontsize=9)
+    return fig
 
 
 def fig_group(sub: pd.DataFrame, field: str, states: list, colours: dict):
@@ -874,8 +1224,11 @@ def fig_group(sub: pd.DataFrame, field: str, states: list, colours: dict):
 # ---------------------------------------------------------------- M7 rare behaviour
 
 
-def knn_outliers(df: pd.DataFrame, run: Path, rng, per_group=300, min_group=30, k=10, top=24, per_bird=3):
-    """kNN distance in standardised h within bird x month x recording regime, relative to the group median."""
+def knn_scores(df: pd.DataFrame, run: Path, rng, per_group=300, min_group=30, k=10) -> pd.DataFrame:
+    """kNN distance in standardised h within bird x month x recording regime, relative to the group median.
+
+    Scores a sample of up to ``per_group`` windows of every group with >= ``min_group`` windows (empty frame when
+    no group is large enough)."""
     grp = df.groupby(["bird", "month", "regime"], observed=True).indices
     picks = [rng.choice(ix, min(per_group, len(ix)), replace=False) for ix in grp.values() if len(ix) >= min_group]
     if not picks:
@@ -888,11 +1241,70 @@ def knn_outliers(df: pd.DataFrame, run: Path, rng, per_group=300, min_group=30, 
         i = pos[g.index].to_numpy()
         d = NearestNeighbors(n_neighbors=min(k + 1, len(i))).fit(X[i]).kneighbors(X[i])[0][:, -1]
         score[i] = d / np.median(d)
-    sample = sample.assign(knn_score=score).sort_values("knn_score", ascending=False)
+    return sample.assign(knn_score=score)
+
+
+def top_outliers(scored: pd.DataFrame, top=24, per_bird=3) -> pd.DataFrame:
+    """The gallery: highest kNN scores, at most ``per_bird`` per bird."""
+    if not len(scored):
+        return pd.DataFrame()
+    sample = scored.sort_values("knn_score", ascending=False)
     sample = sample.groupby("bird", observed=True).head(per_bird).head(top)
     cols = ["bird", "row", "t_start", "month", "regime", "state", "knn_score", "acc_samples", "sensitivity_k",
             "gps_fixes", "vedba", "speed_mean", "solar_hour_bin"]
     return sample[[c for c in cols if c in sample]]
+
+
+def knn_outliers(df: pd.DataFrame, run: Path, rng, per_group=300, min_group=30, k=10, top=24, per_bird=3):
+    """kNN distance in standardised h within bird x month x recording regime, relative to the group median."""
+    return top_outliers(knn_scores(df, run, rng, per_group, min_group, k), top, per_bird)
+
+
+OUTLIER_FACTORS = {  # factor: window mask
+    f"short window (acc_samples < {FULL_SAMPLES})": lambda d: d["acc_samples"] < FULL_SAMPLES,
+    "sensitivity k=1 (continuous mode)": lambda d: d["sensitivity_k"] == 1,
+    "GPS present (gps_fixes > 0)": lambda d: d["gps_fixes"] > 0,
+}
+
+
+UNRELIABLE_FACTOR = "bird had unreliable-calibration bursts left out (windows_summary.csv)"
+
+
+def unreliable_calibration_birds(windows: Path) -> set | None:
+    """Birds with bursts_unreliable_calibration > 0 in the windows directory's windows_summary.csv (written by
+    windows.py); None when the file or column is absent."""
+    p = windows / "windows_summary.csv"
+    if not p.exists():
+        return None
+    w = pd.read_csv(p, dtype={"bird": str})
+    if "bird" not in w or "bursts_unreliable_calibration" not in w:
+        return None
+    return set(w.loc[pd.to_numeric(w["bursts_unreliable_calibration"], errors="coerce").fillna(0) > 0, "bird"])
+
+
+def outlier_factors(scored: pd.DataFrame, gallery: pd.DataFrame, top_frac: float = 0.01,
+                    unreliable_birds: set | None = None) -> pd.DataFrame:
+    """Share of outlier windows with each recording factor against its share among all scored windows.
+
+    ratio = share among outliers / share among scored windows (1 = not over-represented). Two outlier sets: the
+    top ``top_frac`` of scored windows by kNN score, and the gallery of m7_outliers.csv. With
+    ``unreliable_birds``, a bird-level factor: the window's bird had bursts of an unreliable calibration left
+    out (those bursts never become windows, so a window-level or period-level flag cannot exist)."""
+    factors = dict(OUTLIER_FACTORS)
+    if unreliable_birds is not None:
+        factors[UNRELIABLE_FACTOR] = lambda d: d["bird"].astype(str).isin(unreliable_birds)
+    n_top = max(int(np.ceil(top_frac * scored["knn_score"].notna().sum())), 1)
+    sets = {f"top {top_frac:.0%} of scored windows": scored.nlargest(n_top, "knn_score"),
+            "gallery (m7_outliers.csv)": gallery}
+    rows = []
+    for name, s in sets.items():
+        for f, fn in factors.items():
+            base = float(fn(scored).mean())
+            share = float(fn(s).mean()) if len(s) else np.nan
+            rows.append({"outlier_set": name, "factor": f, "n_outliers": len(s), "n_outliers_with_factor":
+                         int(fn(s).sum()) if len(s) else 0, "share_outliers": share, "n_scored": len(scored),
+                         "share_scored": base, "ratio": share / base if base > 0 else np.nan})
+    return pd.DataFrame(rows)
 
 
 def fig_gallery(windows: Path, rows: pd.DataFrame, title: str, extra: str = ""):
@@ -942,8 +1354,24 @@ def main(argv: list[str] | None = None) -> None:
     states = sorted(set(df["state_gmm"]) | set(df.get("state_hmm", df["state"])))
     colours = state_colours(states)
     birds = sorted(str(b) for b in df["bird"].unique())
-    meta, cov = load_reference(args.reference, birds, out)
+    reference, ref = load_age(args.reference, birds, out)
+    age = ref is not None
+    meta, cov = load_reference(args.reference, birds, out, age_source=age)
     df["sex"] = df["bird"].astype(str).map(meta.set_index("bird")["sex"])
+    if age:
+        df["age_days"], df["age_class"], fledges = window_age(df, ref, reference)
+        gmeta = pd.DataFrame({"bird": birds, "tagged_young": [
+            flag_label(v, "tagged young", "not young") for v in ref["tagged_young"]]})
+        gmeta["tagged_young"] = gmeta["tagged_young"].replace({"not stated": "age not stated"})
+        if "migrant" in ref:
+            gmeta["migrant"] = [flag_label(v, "migrant", "not migrant") for v in ref["migrant"]]
+        cov = pd.concat([cov, pd.DataFrame([
+            {"field": f, "column": "aquilacl.reference.load_birds", "birds": len(birds), "matched": np.nan,
+             "with_value": int(ref[f].eq(True).sum() if f in ("tagged_young", "migrant") else ref[f].notna().sum()),
+             "missing": int(len(birds) - (ref[f].eq(True).sum() if f in ("tagged_young", "migrant")
+                                          else ref[f].notna().sum())), "conflict": 0}
+            for f in ("tagged_young", "hatch_year", "migrant") if f in ref])], ignore_index=True)
+        cov["matched"] = cov["matched"].astype("Int64")
 
     # M1
     loss = read_loss(args.run / "loss.csv")
@@ -1038,6 +1466,18 @@ def main(argv: list[str] | None = None) -> None:
     out.fig(share_grid(df, "doy_bin", 7, "year", "day of year (7-day bins, UTC)", "seasonal state use per year",
                        states, colours, (1, 367)),
             "m5_seasonal.png", "M5", "seasonal change of state use, per year, with coverage")
+    smode, mode_w = seasonal_by_mode(df, states)
+    out.table(smode, "m5_seasonal_by_mode.csv", "M5", "monthly bird-weighted state shares (years pooled): all windows, "
+              "by recording mode (k=1/k=0), by GPS present/absent, by both, and mode-adjusted", index=False)
+    out.fig(fig_seasonal_by_mode(smode, states, colours), "m5_seasonal_by_mode.png", "M5",
+            "which seasonal differences remain within one recording mode? (k=1 continuous recording is concentrated "
+            "in April-August)")
+    contrast = seasonal_mode_contrast(smode, states)
+    out.table(contrast, "m5_seasonal_by_mode_contrast.csv", "M5", "per state: share in the months with k=1 data "
+              "minus the other months, all windows vs within k=0 only (does the seasonal difference survive within "
+              "one mode?)", index=False)
+    for n in seasonal_mode_note(smode, df, states, mode_w, contrast):
+        out.note(n)
     col = args.state_col
     runs, same_seg, seq = runs_table(df, "state")
     counts = transition_matrix(same_seg, seq, states)
@@ -1054,14 +1494,31 @@ def main(argv: list[str] | None = None) -> None:
             "how does state use differ between birds; is a state confined to some birds?")
     out.fig(fig_calendar(df, colours), "m6_calendar.png", "M6", "state sequences per bird in calendar time, gaps marked")
     summ = bird_summary(df, budget, states, meta, rng)
+    if age:
+        summ = summ.join(ref[[c for c in ("tagged_young", "hatch_year", "migrant") if c in ref]])
     out.table(summ, "m6_bird_summary.csv", "M6", "per-bird coverage, diversity and metadata")
     out.fig(fig_bird_diversity(summ), "m6_bird_diversity.png", "M6",
             "how variable are birds' budgets, independent of coverage?")
     out.table(cov, "m6_metadata_coverage.csv", "M6", "which birds have sex, life stage and deployment date "
               "in the reference data (missing and conflicting values are counted, never filled)", index=False)
-    out.table(group_tests(budget, meta, states, args.permutations, rng, out, colours), "m6_group_tests.csv", "M6",
-              "do state budgets differ by sex or life stage? (bird-level permutation test; not adjusted for cohort, "
-              "coverage or tracking duration)", index=False)
+    if age:
+        fields, desc = ["sex", "tagged_young"], {
+            "tagged_young": "'age not stated' is not 'adult'; it mixes adults with birds whose age is unrecorded"}
+        if "migrant" in gmeta and gmeta["migrant"].eq("migrant").any():
+            fields.append("migrant")
+            if not gmeta["migrant"].eq("not migrant").any():
+                desc["migrant"] = "'not stated' is not 'resident'"
+        elif "migrant" in gmeta:
+            out.note("migrant: no bird has the migrant flag in aquilacl.reference; no migrant test")
+        gm = meta.drop(columns=["life_stage"]).merge(gmeta, on="bird", how="left")
+        gt = group_tests(budget, gm, states, args.permutations, rng, out, colours, fields, desc)
+        q = ("do state budgets differ by sex, tagged young vs age not stated (descriptive) or migrant flag? "
+             "(bird-level permutation test; not adjusted for cohort, coverage or tracking duration)")
+    else:
+        gt = group_tests(budget, meta, states, args.permutations, rng, out, colours)
+        q = ("do state budgets differ by sex or life stage? (bird-level permutation test; not adjusted for cohort, "
+             "coverage or tracking duration)")
+    out.table(gt, "m6_group_tests.csv", "M6", q, index=False)
     if df["sex"].notna().any():
         out.fig(share_grid(df.dropna(subset=["hour_bin", "sex"]), "hour_bin", 1, "sex", "local solar hour (h)",
                            "diel state use by sex (all years)", states, colours, (0, 24)),
@@ -1070,7 +1527,32 @@ def main(argv: list[str] | None = None) -> None:
                            "seasonal state use by sex (years pooled)", states, colours, (1, 367)),
                 "m6_sex_seasonal.png", "M6", "does seasonal state use differ by sex? (years pooled, with coverage)")
     m = meta.set_index("bird")
-    if m["life_stage"].notna().any() and m["deploy_on"].notna().any():
+    if age:
+        dev, xlabel = development_table(df, ref, reference, states, out, fledges)
+        if len(dev):
+            share, nb, nw = bird_share(dev, "dev_month", states)
+            dt = share.add_prefix("share_state_").assign(n_birds=nb, n_windows=nw.reindex(share.index))
+            dt.index.name = xlabel.replace(" ", "_")
+            out.table(dt, "m6_development.csv", "M6", f"tagged-young birds: bird-weighted state share by {xlabel} "
+                      "(pre_fledge windows left out), birds and windows per month")
+            out.fig(share_grid(dev, "dev_month", 1, "group", xlabel, f"tagged-young birds: state use by {xlabel} "
+                               "(pre_fledge left out; line = birds in the share)", states, colours),
+                    "m6_development.png", "M6", f"how does state use of tagged-young birds change with {xlabel}?")
+        else:
+            out.note("m6_development not produced: no tagged-young bird has windows after pre_fledge")
+        pairs, ysum = y1_vs_y2(df, ref, states, args.permutations, rng)
+        if len(pairs):
+            out.table(pairs, "m6_age_y1_vs_y2.csv", "M6", "tagged-young birds: state shares in the same calendar "
+                      "month in year 1 and year 2, with each side's k=1 and GPS share", index=False)
+            out.table(ysum, "m6_age_y1_vs_y2_summary.csv", "M6", "year 2 minus year 1, paired within bird and "
+                      "calendar month, bird-level sign-flip test", index=False)
+            out.fig(fig_y1_vs_y2(pairs, ysum, states, colours), "m6_age_y1_vs_y2.png", "M6",
+                    "does a tagged-young bird use states differently in its second year than in the same months "
+                    "of its first year?")
+        else:
+            out.note(f"m6_age_y1_vs_y2 not produced: no tagged-young bird has >= {MIN_BIN_WINDOWS} windows in the "
+                     "same calendar month in both year 1 and year 2")
+    elif m["life_stage"].notna().any() and m["deploy_on"].notna().any():
         dep = df["bird"].astype(str).map(m["deploy_on"])
         df["life_stage"] = df["bird"].astype(str).map(m["life_stage"])
         df["months_bin"] = np.floor((df["t_start"].dt.tz_localize(None) - dep).dt.days / 30.44)
@@ -1094,8 +1576,22 @@ def main(argv: list[str] | None = None) -> None:
         out.fig(fig_gallery(args.windows, ex, f"smallest {'stable ' if jac is not None else ''}states: {rare} "
                             f"(shares {', '.join(f'{share[s]:.2%}' for s in rare)})"),
                 "m7_rare_states.png", "M7", "what do the rarest reproducible states look like?")
-    outl = knn_outliers(df, args.run, rng)
+    scored = knn_scores(df, args.run, rng)
+    outl = top_outliers(scored)
     if len(outl):
+        unrel = unreliable_calibration_birds(args.windows)
+        out.table(outlier_factors(scored, outl, unreliable_birds=unrel), "m7_outlier_factors.csv", "M7",
+                  "are outliers over-represented among short windows, k=1 (continuous mode) or GPS windows? "
+                  "(ratio = share among outliers / share among scored windows)", index=False)
+        out.note("m7_outlier_factors: the baseline is the scored sample (up to 300 windows per bird x month x "
+                 "regime), not all windows. Scores are relative to the median of the window's own bird x month x "
+                 "regime group, so short windows are compared with short windows and their ratio is partly fixed "
+                 "by that design. Calibration: windows.py leaves out every burst of a calibration marked "
+                 "unreliable, so no window comes from an unreliable period and a period-level flag cannot exist; "
+                 + ("the bird-level factor (bird had such bursts left out, which can leave holes in its windows) "
+                    f"comes from windows_summary.csv ({len(unrel)} birds)" if unrel is not None else
+                    "windows_summary.csv with bursts_unreliable_calibration is not in the windows directory, so "
+                    "no calibration factor is reported"))
         out.table(outl, "m7_outliers.csv", "M7", "most isolated windows in h within bird x month x regime "
                   "(format columns included to separate recording artefacts from behaviour)", index=False)
         out.fig(fig_gallery(args.windows, outl, "kNN-distance outliers (score = 10th-neighbour distance / group "
@@ -1108,7 +1604,8 @@ def main(argv: list[str] | None = None) -> None:
               index=False, chunksize=500_000, compression="gzip")
 
     header = [f"- states: `{args.states}`", f"- windows: `{args.windows}`", f"- run: `{args.run}`",
-              f"- reference: `{args.reference}` (only the id, sex, life-stage and deployment-date columns are read)",
+              f"- reference: `{args.reference}` (only the id, sex, life-stage and deployment-date columns are read"
+              + ("; age, tagged-young, hatch-year and migrant fields come from aquilacl.reference)" if age else ")"),
               f"- {len(df)} windows, {len(birds)} birds, {len(states)} states; seed {args.seed}",
               f"- analysis state = `{args.state_col}` of states.parquet (transitions, dwell, budgets, cards); "
               "per-state Jaccard (M3) refers to the unsmoothed GMM `state` with the same number",
@@ -1117,7 +1614,8 @@ def main(argv: list[str] | None = None) -> None:
               f"- temporal shares are bird-weighted: each bird with >= {MIN_BIN_WINDOWS} windows in a bin counts once",
               f"- per-bird comparisons use birds with >= {MIN_BIRD_WINDOWS} windows",
               "- no latitude, longitude or maps are read or shown"]
-    out.write_index(header)
+    first_draft = [(a, q, AGE_FIRST_DRAFT.get(a, b) if age else b) for a, q, b in FIRST_DRAFT]
+    out.write_index(header, first_draft)
     print(f"wrote {len(out.items)} outputs to {args.out}")
 
 

@@ -12,7 +12,7 @@
 set -euo pipefail
 source "$HOME/opt/miniforge3/etc/profile.d/conda.sh"; conda activate aquilacl
 # Usage: RUNS="<run dir> [<run dir>]" STATES2="<K=2 states dir> [...]" STATES6="<K=6 states dir> [...]" \
-#        WINDOWS=<windows dir> REFERENCE="<Movebank reference CSV>" OUT=<new dir> [N_BOOT=20] [N_PERM=2000] [UMAP=1] \
+#        WINDOWS=<windows dir> REFERENCE="<Movebank reference CSV>" OUT=<new dir> [N_BOOT=100] [N_PERM=2000] [UMAP=1] \
 #        sbatch 09_flight.sh
 # RUNS, STATES2 and STATES6 are split on spaces (their paths must not contain spaces); REFERENCE may contain spaces.
 : "${RUNS:?set RUNS to the run directories (space-separated)}"; : "${STATES2:?set STATES2 (same order as RUNS)}"
@@ -31,5 +31,5 @@ for i in "${!run_arr[@]}"; do args+=(--run "${run_arr[$i]}" --states2 "${s2_arr[
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
 echo "== flight $(date)"
 python -m aquilacl.flight "${args[@]}" --windows "$WINDOWS" --reference "$REFERENCE" --out "$OUT" \
-    --n-boot "${N_BOOT:-20}" --n-perm "${N_PERM:-2000}" --workers $(( SLURM_CPUS_PER_TASK - 2 )) ${UMAP:+--umap}
+    --n-boot "${N_BOOT:-100}" --n-perm "${N_PERM:-2000}" --workers $(( SLURM_CPUS_PER_TASK - 2 )) ${UMAP:+--umap}
 echo "== done $(date)"

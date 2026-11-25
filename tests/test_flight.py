@@ -12,12 +12,61 @@ K6 = 4  # synthetic K=6 stand-in: 0 ground, 1 climbing circling, 2 descending gl
 
 
 @pytest.mark.parametrize("t, cont, want", [
-    ([0, 10, 35, 61, 71], [1, 1, 1, 1, 1], [0, 0, 0, 1, 1]),   # a 25 s step joins, 26 s splits
-    ([0, 10, 20, 30], [1, 1, 0, 1], [0, 0, -1, 1]),            # a window of another mode splits
+    ([0, 10, 40, 71, 81], [1, 1, 1, 1, 1], [0, 0, 0, 1, 1]),   # a 30 s step joins, 31 s splits
+    ([0, 10, 20, 34], [1, 1, 0, 1], [0, 0, -1, 0]),            # a k=0 burst inside a 24 s hole does not split
+    ([0, 10, 45, 80], [1, 0, 0, 1], [0, -1, -1, 1]),           # k=0 windows inside a long gap: the gap splits
     ([0, 10], [0, 0], [-1, -1]),
 ])
 def test_bout_ids(t, cont, want):
     assert flight.bout_ids(np.array(t, float), np.array(cont, bool)).tolist() == want
+
+
+def test_legacy_rule_durations_and_inside_count():
+    t, c = np.array([0, 10, 20, 34, 44.0]), np.array([1, 1, 0, 1, 1], bool)
+    assert flight._legacy_bout_ids(t, c).tolist() == [0, 0, -1, 1, 1]  # the first run's rule split here
+    ids = flight.bout_ids(t, c)
+    acc = np.array([200, 144, 40, 200, 64])  # the last window is a 64-sample tail: 3.2 s, not 10 s
+    assert flight.bout_durations(t, ids, acc) == pytest.approx([47.2])
+    assert flight.bout_durations(t, ids) == pytest.approx([54.0])
+    assert flight._inside(t, c, ids) == 1
+
+
+def test_stratified_permutation():
+    rng = np.random.default_rng(0)
+    # sex aligned with a stratum that shifts the value: the raw difference is large, the within-stratum one is 0
+    v = np.r_[np.ones(6), np.zeros(6)]
+    lab = np.r_[1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0]
+    st = np.r_[["A"] * 6, ["B"] * 6]
+    r = flight.strat_perm_diff(v, lab, st, 199, rng)
+    assert abs(v[lab == 1].mean() - v[lab == 0].mean()) > 0.6 and r["diff_strat"] == pytest.approx(0.0)
+    assert r["p_perm"] == pytest.approx(1.0) and r["n_informative"] == 12 and r["strata_informative"] == 2
+    # no stratum holds both groups: NaN, not the permutation floor
+    r = flight.strat_perm_diff(v, np.r_[np.ones(6), np.zeros(6)].astype(int), st, 199, rng)
+    assert np.isnan(r["p_perm"]) and np.isnan(r["diff_strat"]) and r["n_informative"] == 0
+    assert flight.nuisance_auc(np.r_[np.ones(6), np.zeros(6)].astype(int), st) == pytest.approx(1.0)
+    # a planted within-stratum effect reaches the floor, printed as such
+    v2 = np.r_[np.ones(10), np.zeros(10)] + np.r_[np.zeros(5), 5 * np.ones(5), np.zeros(5), 5 * np.ones(5)]
+    lab2 = np.r_[np.ones(10), np.zeros(10)].astype(int)
+    st2 = np.r_[["A"] * 5, ["B"] * 5, ["A"] * 5, ["B"] * 5]
+    r = flight.strat_perm_diff(v2, lab2, st2, 99, rng)
+    assert r["diff_strat"] == pytest.approx(1.0) and flight._fp(r["p_perm"], 99) == "<= 1/100"
+    assert flight._fp(0.0312, 99) == "0.0312" and flight._fp(np.nan, 99) == "NA"
+
+
+def test_bird_month_means_weight_months_equally():
+    t = pd.to_datetime(["2024-05-10"] * 100 + ["2024-06-10"] * 10 + ["2024-07-10"] * 5, utc=True)
+    F = pd.DataFrame({"bird": "B0", "t_start": t})
+    Z = np.r_[np.zeros(100), np.ones(10), 9 * np.ones(5)][:, None]
+    bm = flight.bird_month_means(F, Z, np.ones(len(F), bool))  # July has < MIN_BM_WINDOWS windows: left out
+    assert bm.loc["B0", "pc1"] == pytest.approx(0.5) and bm.loc["B0", "months"] == 2 and bm.loc["B0", "windows"] == 115
+
+
+def test_holm_family_over_runs():
+    t1 = pd.DataFrame({"variant": ["all", "all", "full"], "p_perm": [0.01, 0.02, 0.01], "testable": [True, False, True]})
+    t2 = pd.DataFrame({"variant": ["all", "full"], "p_perm": [0.03, 0.5], "testable": [True, True]})
+    flight.holm_family([t1, t2])
+    assert t1["p_holm"].round(3).tolist()[0] == 0.02 and np.isnan(t1["p_holm"].iat[1])
+    assert t2["p_holm"].iat[0] == pytest.approx(0.03) and (t1["holm_family_size"].tolist() == [2, 2, 2])
 
 
 def test_small_statistics():
@@ -31,7 +80,7 @@ def test_small_statistics():
 def test_bout_descriptors_by_hand():
     n = 8  # 80 s: climb +2 m/s for 4 windows, then -1 m/s at 15 m/s for 4 windows
     B = pd.DataFrame({"bout": 0, "bird": "B0", "cohort": "2024", "t_start": pd.Timestamp("2024-06-01", tz="UTC"),
-                      "t_s": 10.0 * np.arange(n), "n_speed": 10, "flight": True,
+                      "t_s": 10.0 * np.arange(n), "n_speed": 10, "flight": True, "acc_samples": 200,
                       "speed_mean": [8.0] * 4 + [15.0] * 4, "climb_mean": [2.0] * 4 + [-1.0] * 4,
                       "turn_abs_mean": [36.0] * 4 + [0.0] * 4, "n_turn": 10, "turn_net_deg": [360.0] * 4 + [0.0] * 4,
                       "label_flapping": [0.0] * 7 + [np.nan], "flap_band_frac": 0.1, "local_solar_hour": 11.0,
@@ -41,10 +90,35 @@ def test_bout_descriptors_by_hand():
     T = flight.bout_table(B, Z, H, K6).iloc[0]
     assert T["duration_s"] == 80 and T["net_climb_m"] == pytest.approx(40.0)
     assert T["climb_first_half_m"] == pytest.approx(80.0) and T["climb_second_half_m"] == pytest.approx(-40.0)
-    assert T["circles_gross"] == pytest.approx(4.0) and T["circles_net"] == pytest.approx(4.0)
+    assert T["turn_gross_deg_per_min"] == pytest.approx(4 * 360 / (80 / 60)) and T["circles_net"] == pytest.approx(4.0)
     assert T["glide_ratio"] == pytest.approx(15.0)  # 600 m forward over 40 m lost
     assert T["share_state_1"] == 0.5 and T["state_changes"] == 1 and T["flap_share"] == 0.0
     assert T["h_spread"] == pytest.approx(0.0)
+    # a 64-sample tail with 3 GPS fixes at -3 m/s adds -9 m (not -30 m) and 3.2 s
+    tail = B.iloc[[-1]].assign(t_s=80.0, acc_samples=64, n_speed=3, climb_mean=-3.0, speed_mean=15.0)
+    T2 = flight.bout_table(pd.concat([B, tail], ignore_index=True), np.zeros((n + 1, 2)), np.tile(np.eye(1, 4), (n + 1, 1)), K6).iloc[0]
+    assert T2["net_climb_m"] == pytest.approx(31.0) and T2["duration_s"] == pytest.approx(83.2)
+    assert T2["glide_ratio"] == pytest.approx((600 + 45) / (40 + 9))
+    # a bout without any K=6 state has NaN shares, not 0
+    T3 = flight.bout_table(B.assign(state6=-1), Z, H, K6).iloc[0]
+    assert np.isnan(T3["share_state_1"])
+
+
+def test_straight_flight_heading_noise_is_not_circling():
+    rng = np.random.default_rng(3)
+    n = 60  # 10 min of straight flight; 1 Hz turn rates with sd 7 deg/s (mean |turn| about 5.6 deg/s)
+    turn = rng.normal(0, 7.0, (n, 10))
+    B = pd.DataFrame({"bout": 0, "bird": "B0", "cohort": "2024", "t_start": pd.Timestamp("2024-06-01", tz="UTC"),
+                      "t_s": 10.0 * np.arange(n), "n_speed": 10, "flight": True, "acc_samples": 200, "speed_mean": 14.0,
+                      "climb_mean": 0.0, "turn_abs_mean": np.abs(turn).mean(1), "n_turn": 10,
+                      "turn_net_deg": turn.sum(1), "label_flapping": 0.0, "flap_band_frac": 0.1,
+                      "local_solar_hour": 11.0, "month": 6, "state6": 2})
+    T = flight.bout_table(B, np.zeros((n, 2)), np.tile(np.eye(1, 4), (n, 1)), K6).iloc[0]
+    assert T["turn_gross_deg_per_min"] / 360 > 0.8  # the old gross measure read this as circling
+    assert T["circles_per_min"] < 0.2
+    row = T.copy()
+    row["climb_first_half_m"] = row["climb_second_half_m"] = 0.0
+    assert "circling" not in flight.type_words(row, pd.DataFrame(columns=["from", "to", "count"]), pd.DataFrame())
 
 
 def test_fit_axes_recovers_planted_axis_with_positive_sign():
@@ -136,7 +210,8 @@ def _synthetic(tmp_path):
                       "speed_mean_median": [0.0, 10.0, 18.0, 12.0], "climb_mean_median": [0.0, 2.0, -2.0, 0.0],
                       "turn_abs_mean_median": [0.0, 30.0, 2.0, 5.0]}).set_index("state").to_csv(
             s6dirs[i] / "state_profiles.csv")
-    rows = [[str(i), f"B{b}; {100 + i}", "2024-06-05 00:00:00.000", "", "", "f" if b % 2 else "m", "",
+    rows = [[str(i), f"B{b}; {100 + i}", f"{2024 if b < N_BIRDS // 2 else 2025}-06-05 00:00:00.000", "", "",
+             "f" if b % 2 else "m", "",
              "Tagged as a nestling" if b in (1, 2) else "", "M1", "fw1"] for i, b in enumerate(range(N_BIRDS))]
     ref = tmp_path / "reference data (1).csv"
     pd.DataFrame(rows, columns=["tag-id", "animal-id", "deploy-on-date", "deploy-off-date", "animal-comments",
@@ -161,7 +236,7 @@ def test_end_to_end_cli(tmp_path):
         assert (out / f).exists()
     for r in ("rA", "rB"):
         o = out / r
-        for f in ["axis_summary.csv", "axis_correlations.csv", "sex_tests_axes.csv", "bird_pc_means.csv",
+        for f in ["axis_summary.csv", "axis_correlations.csv", "sex_tests_axes.csv", "bird_pc_means.csv", "bird_coverage.csv",
                   "flightmap_pc_all.png", "flightmap_pc_k1.png", "density_sex.png", "density_month_k1.png",
                   "flightmap_speed_climb.png", "bouts.csv", "bout_k_table.csv", "bout_types.csv",
                   "bout_type_groups.csv", "bout_type_transitions.csv", "bout_types.png", "flight.json"]:
@@ -173,8 +248,15 @@ def test_end_to_end_cli(tmp_path):
         assert all(top[p].loc[top[p].abs().idxmax()] > 0 for p in (1, 2))
         assert top.loc["sensitivity_k"].abs().max() < 0.2
         t = pd.read_csv(o / "sex_tests_axes.csv")
-        k1 = t[t["subset"] == "k1"]  # k0: < MIN_BIRD_WINDOWS flight windows per bird, so no test (NaN)
+        k1 = t[(t["subset"] == "k1") & (t["variant"] == "all")]  # k0: < MIN_BIRD_WINDOWS flight windows per bird: no test
         assert k1["p_perm"].between(0, 1).all() and (k1["n_f"] == 5).all() and t.loc[t["subset"] == "k0", "p_perm"].isna().all()
+        assert set(t["variant"]) == {"all", "full"} and (k1["holm_family_size"] == 20).all()  # 2 runs x 5 PCs x {all, k1}; k0 untestable
+        assert k1["axis_label"].str.contains("n=").all() and k1["nuisance_auc"].between(0.5, 1).all()
+        s_ = pd.read_csv(o / "axis_summary.csv")
+        assert s_["variance_explained"].between(0, 1).all()
+        assert not np.allclose(s_.loc[s_["subset"] == "k1", "variance_explained"], s_.loc[s_["subset"] == "all", "variance_explained"])
+        cov = pd.read_csv(o / "bird_coverage.csv")
+        assert len(cov) == N_BIRDS and cov["in_states2"].all() and set(cov["cohort"].astype(str)) == {"2024", "2025"}
         bouts = pd.read_csv(o / "bouts.csv")
         assert len(bouts) == N_BIRDS * N_BOUTS and (bouts["duration_s"] >= 60).all()
         k = pd.read_csv(o / "bout_k_table.csv")

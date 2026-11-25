@@ -8,7 +8,7 @@
 #SBATCH --job-name=aquilacl_anomaly
 #SBATCH --cpus-per-task=36
 #SBATCH --mem=300G
-#SBATCH --time=03:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=/project/ai4wy-eap/nmille39/aquilacl/logs/%x_%j.log
 set -euo pipefail
 source "$HOME/opt/miniforge3/etc/profile.d/conda.sh"; conda activate aquilacl

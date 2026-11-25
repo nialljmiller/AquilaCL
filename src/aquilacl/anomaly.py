@@ -20,7 +20,9 @@ PART 1. Sensor/recording QC (deterministic; no model). Per window, from acc.npy 
 - gps_impossible: ground speed > 50 m/s, climb > 20 or < -50 m/s, a 1-s speed change > 25 m/s, or ground speed
   and track speed differing by > 15 m/s.
 Per night: roost change = angle between the median gravity direction of the next ROOST_AFTER qualifying nights
-(this one included) and that of the previous ROOST_BEFORE; events = runs of nights above ROOST_CP_DEG (30 deg).
+(this one included) and that of the previous ROOST_BEFORE; events = runs of nights above ROOST_CP_DEG (30 deg; chosen
+after seeing the clean rate on the real data, so slip recall is not out of sample). A 180 deg yaw slip is invisible
+to every check (gravity unchanged, flapping axis axial).
 Per day: still static-norm median off 1 g by > DAY_NORM_TOL_G; flapping-axis axial mean of the day > YAW_DAY_DEG
 from the previous YAW_REF_DAYS days; share of flapping-with-GPS windows at zero speed >= 0.5.
 Validation: the v1 faults (stuck axis, 90 deg tilt about a horizontal axis of the roost frame, 90 deg yaw about the
@@ -29,7 +31,9 @@ saturation (x2.5, clipped at the bird's rails) and a GPS speed spike (one fix at
 the host bird and run through the same code; recall per check among ELIGIBLE windows, eligible share, and the
 clean false-positive rate. Persistent slips: from a random onset, all later still-night windows are tilted by
 15/30/90 deg (or all later flapping windows yawed); detected if the night/day statistic exceeds its threshold
-within -4..+4 nights/days of the onset; the clean rate is the same test at the same positions without a slip.
+within -4..+4 nights/days of the onset (SLIP_DEG: 15-45 deg in 5 deg steps and 90 deg); the clean rate is the same
+test at the same positions without a slip. Injections that set exactly the thresholded quantity (stuck axis,
+amplitude, saturation, GPS zero / spike) only show that the code works.
 Timelines use days relative to the bird's first window (no dates).
 
 PART 2. Behavioural anomalies (h of each --run). Full windows only (acc_samples >= 190) at the window, bout and
@@ -38,7 +42,8 @@ day levels; short windows are not reported at any of them.
   (sensitivity_k 0/1) and K=2 state, reference within +-45 days (15-day query chunks; fallback +-90 d, whole record;
   same segment and same local day never neighbours), divided by the reference's median k-NN distance, robust z
   within bird x mode x state. Primary flags: 99th percentile of z per mode x state, pooled over birds (mode and
-  state neutral by construction; birds can differ in flag rate). One pooled threshold and the per-bird top 1% are
+  state neutral by construction; birds can differ in rate). "Flags" at every behavioural level are the top 1% ranked
+  for inspection, not detections (no window-level injection exists). One pooled threshold and the per-bird top 1% are
   reported as well. The remaining format factors (segment edge, 190-199 samples, partial GPS, single-window
   segment) are the real neutrality test.
 - Bout level (continuous mode): bouts as flight.bout_ids (k=1 windows <= 25 s apart, >= 60 s) with >= 6 full
@@ -50,8 +55,9 @@ day levels; short windows are not reported at any of them.
 - Day level (scheduled mode): bird-days with >= DAY_M full k=0 windows over >= DAY_MIN_HOURS distinct local solar
   hours (partial days are counted, not scored). Day score = DAY_K-th smallest energy distance (DAY_PCS principal
   components of h; PCA on a bird-balanced sample of full k=0 windows) between the day and each other eligible day of
-  the bird within +-45 d; each comparison uses DAY_M windows of the day from hours both days have, each paired with
-  a window of the other day in the same hour, so both sides are single days of equal size and hour composition.
+  the bird within +-45 d; each comparison draws DAY_M windows per side WITHOUT replacement from the hours both days
+  have (hour h gives at most min(nQ_h, nY_h) to each side), so both sides are single days of equal size and hour
+  composition with no repeated window (with replacement, days with few windows per hour scored high).
   Robust z within bird; one pooled 99th-percentile threshold.
 - Validation with h-level injections: a bout replaced by another bird's bout of the same length bin whose K=6
   state shares differ from the host bout (L1 >= 0.5: diff_mix), differ from every bout of the host in that bin
@@ -60,18 +66,21 @@ day levels; short windows are not reported at any of them.
   another bird's eligible day within +-15 days of the year. Recall at the primary threshold of the host's stratum,
   AUC against the clean scores of the same hosts, 95% intervals from resampling host birds.
 - Format neutrality: share of each factor among flagged / among scored units; met when every format factor
-  present in >= 0.1% of scored units has a ratio within 0.67-1.5.
+  present in >= 0.1% of scored units has a ratio within 0.67-1.5. It concerns scored units only: short windows are
+  excluded before scoring, and the summary states the share of windows, bird-days and birds with no score.
 
 Level 2 (bird among birds; every window format, each in its own cell): cells = window format (full / 40-sample /
 64-sample / other short) x mode x K=2 state x season (DJF, MAM, JJA, SON). Each bird with >= L2_N windows in a cell
 contributes exactly L2_N (equal size); unbiased MMD^2 (RBF, median heuristic, L2_PCS principal components) between
-the bird and 2 L2_N rows of the other birds of the cell, each bird weighted equally; robust z across birds within
-the cell. Bird score = mean z over exactly L2_FIX of its cells drawn at random (equal number of cells per bird;
-birds with fewer get none) and, secondary, over all its cells. Month change: MMD^2 between consecutive months
-(L2_MONTH_N rows each) minus the within-month floor (odd vs even local days, L2_MONTH_N / 2 rows each); bird
-summary = mean z of its changes. Nuisance: Spearman rho and partial Spearman (ranks residualised on track_days and
-n_windows by least squares; p from permuting residuals between birds). The level-1 flag rate is no longer a
-nuisance score: with per-bird references it carries no between-bird information by design.
+the bird and 2 L2_N rows of the other birds of the cell, each bird weighted equally; only cells with >= L2_MIN_BIRDS
+(20) birds; within-cell rank of the bird as a fraction (rank - 0.5) / n. Bird score = median of its within-cell
+ranks (>= L2_MIN_CELLS cells). Month change: MMD^2 between consecutive calendar months (L2_MONTH_N rows each; pairs
+across a gap are listed, not scored) minus the within-month floor (odd vs even local days, L2_MONTH_N / 2 rows
+each); bird summary = mean z of its changes. Nuisance [descriptive screen]: Spearman rho and partial Spearman (ranks
+residualised on track_days, n_windows, deployment year and deployment month by least squares; p from permuting
+residuals between birds), Holm over the table, floor p printed as "<= 1/(n_perm+1)". Cohort = real deployment year
+(earliest deploy-on of the reference data). The level-1 flag rate is not a nuisance score: with per-bird references
+it carries no between-bird information by design.
 
 Privacy: latitude and longitude are never read. Outputs carry relative days and months, never dates, clock times
 or solar hours. Bird ids are never printed to stdout; blind pages carry no bird id (their key is a separate CSV).
@@ -104,6 +113,7 @@ from .windows import GPS_CHANNELS  # noqa: E402
 
 FULL_SAMPLES = 190
 NIGHT_SUN = -6.0
+FALLBACK_OFFSET_H = -7.0  # as budgets.py: used only for a bird with no local_solar_hour at all
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 SEASONS = ["DJF", "MAM", "JJA", "SON"]
 NEUTRAL = 1.5  # format ratios within [1/NEUTRAL, NEUTRAL] count as neutral
@@ -122,7 +132,7 @@ NORM_TOL_G = 0.1  # clean still windows: 0.1-99.9 % of |norm| within 0.955-1.08 
 DAY_NORM_TOL_G = 0.03  # per-day median; clean per-bird MAD about 0.001 g
 TILT_WIN_DEG = 60.0
 ROOST_BEFORE, ROOST_AFTER, ROOST_MIN_WIN = 7, 5, 5
-ROOST_CP_DEG = 30.0  # 15 deg gave a 9% clean rate on real data; 30 deg still detects every injected 30/90 deg slip
+ROOST_CP_DEG = 30.0  # chosen AFTER seeing the real clean rate (15 deg: 9%) and the injected slips; not pre-set
 FLAP_VEDBA, FLAP_BAND = 0.25, 0.35  # features.reference_labels defaults
 YAW_MIN_SAMPLES, YAW_MIN_ANISO = 100, 0.3
 YAW_WIN_DEG, YAW_DAY_DEG, YAW_REF_DAYS, YAW_MIN_REF, YAW_DAY_MIN = 30.0, 15.0, 30, 20, 10
@@ -130,7 +140,7 @@ CLIP_RAIL_G, CLIP_SHARE = 1.4, 0.05
 GPS_ZERO_MS, GPS_MIN_FIX = 0.5, 5
 GPS_MAX_SPEED, GPS_MAX_CLIMB, GPS_MIN_CLIMB, GPS_MAX_DSPEED, GPS_MAX_MISMATCH = 50.0, 20.0, -50.0, 25.0, 15.0
 DAY_ZERO_SHARE, DAY_ZERO_MIN = 0.5, 5
-SLIP_DEG = (15.0, 30.0, 90.0)
+SLIP_DEG = (15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 90.0)  # recall curve over 20-45 deg (I24)
 SLIP_WIN = 4
 QC_CHECKS = ("stuck_axis", "static_norm", "tilt_night", "yaw_flap", "clipping", "gps_flap_zero", "gps_impossible")
 QC_FAULTS = ("clean", "stuck_axis", "tilt90", "yaw90", "amplitude_half", "saturate", "transplant",
@@ -154,7 +164,7 @@ MIX_DIFF, MIX_SAME = 0.5, 0.2
 OTHER_SEASON_DAYS, OTHER_BIRD_DOY = 120, 15
 
 # ---- level 2
-L2_PCS, L2_N, L2_FIX, L2_MONTH_N, L2_MIN_BIRDS = 20, 200, 3, 40, 5
+L2_PCS, L2_N, L2_MIN_CELLS, L2_MONTH_N, L2_MIN_BIRDS = 20, 200, 3, 40, 20
 
 
 def log(msg: str) -> None:
@@ -195,11 +205,27 @@ def horizontal_axis(g: np.ndarray, rng) -> np.ndarray:
     return np.cos(t) * e1 + np.sin(t) * e2
 
 
-def local_days(t: pd.Series, solar_hour: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Integer local solar day and night (noon to noon) from UTC time and local solar hour."""
-    t = pd.to_datetime(t, utc=True)
+def solar_offset(t: pd.Series, solar_hour: np.ndarray) -> tuple[np.ndarray, int]:
+    """Local mean solar time minus UTC (hours in [-12, 12)) per window; missing local_solar_hour filled from the
+    previous / next window in time (as budgets.solar_offset_h), else FALLBACK_OFFSET_H. Returns (offset, n missing)."""
+    t = pd.to_datetime(pd.Series(t), utc=True).reset_index(drop=True)
     utc_h = (t.dt.hour + t.dt.minute / 60 + t.dt.second / 3600).to_numpy(float)
-    off = np.nan_to_num((np.asarray(solar_hour, float) - utc_h + 12) % 24 - 12)
+    off = (np.asarray(solar_hour, float) - utc_h + 12) % 24 - 12
+    n_nan = int(np.isnan(off).sum())
+    if n_nan:
+        order = np.argsort(t.to_numpy(), kind="stable")
+        s = pd.Series(off[order])
+        filled = s.ffill().bfill().to_numpy() if s.notna().any() else np.full(len(s), FALLBACK_OFFSET_H)
+        off = np.empty_like(off)
+        off[order] = filled
+    return off, n_nan
+
+
+def local_days(t: pd.Series, solar_hour: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Integer local solar day and night (noon to noon) from UTC time and local solar hour (gaps filled, see
+    solar_offset)."""
+    t = pd.to_datetime(pd.Series(t), utc=True).reset_index(drop=True)
+    off, _ = solar_offset(t, solar_hour)
     loc = (t - pd.Timestamp(0, tz="UTC")).dt.total_seconds().to_numpy() / 86400 + off / 24
     return np.floor(loc).astype(np.int64), np.floor(loc + 0.5).astype(np.int64)
 
@@ -1036,16 +1062,21 @@ def energy_distance(X: np.ndarray, Y: np.ndarray) -> float:
 
 
 def day_pair_ed(QX: np.ndarray, QH: np.ndarray, Y: np.ndarray, YH: np.ndarray, rng, m: int = DAY_M) -> float:
-    """Energy distance between two bird-days on their common hours: m windows of the query day drawn from hours
-    the other day also has, each paired with a random window of the other day in the same hour (so both samples
-    have the same hour composition and the same size). NaN if fewer than m query windows fall in common hours."""
+    """Energy distance between two bird-days on their common hours, both sides sampled WITHOUT replacement: hour h
+    can give at most min(nQ_h, nY_h) windows to each side; m slots are drawn without replacement from those
+    per-hour capacities, and each side then takes that many distinct windows of each hour. Both samples have the
+    same size and hour composition and no repeated window, so a day with few windows per hour (schedule change,
+    low battery, missed bursts) is not made to look concentrated by duplicates. NaN if the capacities sum to < m."""
     common = np.intersect1d(np.unique(QH), np.unique(YH))
-    use = np.flatnonzero(np.isin(QH, common))
-    if len(use) < m:
+    q_by = {h: np.flatnonzero(QH == h) for h in common}
+    y_by = {h: np.flatnonzero(YH == h) for h in common}
+    cap = np.array([min(len(q_by[h]), len(y_by[h])) for h in common], int)
+    if cap.sum() < m:
         return np.nan
-    qi = rng.choice(use, m, replace=False)
-    by_h = {h: np.flatnonzero(YH == h) for h in common}
-    yi = np.array([rng.choice(by_h[h]) for h in QH[qi]])
+    slots = np.repeat(np.arange(len(common)), cap)
+    cnt = np.bincount(rng.choice(slots, m, replace=False), minlength=len(common))
+    qi = np.concatenate([rng.choice(q_by[h], c, replace=False) for h, c in zip(common, cnt) if c])
+    yi = np.concatenate([rng.choice(y_by[h], c, replace=False) for h, c in zip(common, cnt) if c])
     return energy_distance(QX[qi], Y[yi])
 
 
@@ -1338,6 +1369,37 @@ def rate_rows(level: str, kind: str, z: np.ndarray, birds: np.ndarray, thr, clea
             "role": "false-positive rate" if kind == "clean" else "recall"}
 
 
+def coverage(F: pd.DataFrame, W: pd.DataFrame, B: pd.DataFrame, Dd: pd.DataFrame | None) -> dict:
+    """What gets no behavioural score (I25): windows without a window-level score (short windows are excluded by
+    design, full windows can lack a reference), and bird-days and birds with no score at any level (no scored
+    window, no scored bout starting that day, no day score)."""
+    n = len(F)
+    short = int((F["acc_samples"].to_numpy() < FULL_SAMPLES).sum())
+    okw = np.isfinite(W["z"].to_numpy())
+    keys = [W.loc[okw, ["bird", "day"]]]
+    if len(B):
+        keys.append(B.loc[np.isfinite(B["content_z"]) | np.isfinite(B["seq_z"]), ["bird", "day"]])
+    if Dd is not None:
+        keys.append(Dd.loc[np.isfinite(Dd["z"]), ["bird", "day"]])
+    scored = pd.concat(keys).drop_duplicates()
+    all_days = F[["bird", "day"]].drop_duplicates()
+    n_days_scored = len(all_days.merge(scored, on=["bird", "day"]))
+    n_day_level = int(np.isfinite(Dd["z"]).sum()) if Dd is not None else 0
+    birds_any = set(scored["bird"])
+    return {"n_windows": n, "n_short": short, "share_short": short / max(n, 1),
+            "n_full_unscored": int((~okw).sum()),
+            "share_windows_no_window_score": (n - int(okw.sum())) / max(n, 1),
+            "n_bird_days": len(all_days), "n_bird_days_no_score": len(all_days) - n_days_scored,
+            "share_bird_days_no_score": (len(all_days) - n_days_scored) / max(len(all_days), 1),
+            "share_bird_days_no_day_score": (len(all_days) - n_day_level) / max(len(all_days), 1),
+            "n_birds": int(F["bird"].nunique()), "n_birds_no_score": int(F["bird"].nunique() - len(birds_any)),
+            "n_birds_no_window_score": int(F["bird"].nunique() - W.loc[okw, "bird"].nunique()),
+            "n_birds_no_bout_score": int(F["bird"].nunique() - (B.loc[np.isfinite(B["content_z"]), "bird"].nunique()
+                                                                if len(B) else 0)),
+            "n_birds_no_day_score": int(F["bird"].nunique() - (Dd.loc[np.isfinite(Dd["z"]), "bird"].nunique()
+                                                               if Dd is not None else 0))}
+
+
 def run_behaviour(F: pd.DataFrame, run: Path, s2: Path, s6: Path, out: Path, k: int, cap: int, min_ref: int,
                   n_inject: int, workers: int, seed: int, rng, top_bouts: int, windows: Path) -> dict:
     name = run.name
@@ -1422,8 +1484,8 @@ def run_behaviour(F: pd.DataFrame, run: Path, s2: Path, s6: Path, out: Path, k: 
     ft_p = factor_table(Ws, pooled, WINDOW_FACTORS).assign(threshold="one pooled threshold")
     ft_g = factor_table(Ws, pergrp, WINDOW_FACTORS).assign(threshold="per bird x mode x state")
     pd.concat([ft_s, ft_p, ft_g]).to_csv(out / f"beh_window_factors_{name}.csv", index=False)
-    top = Ws.assign(flag=strat).nlargest(2000, "z")
-    top[["bird", "row", "rel_day", "month", "sensitivity_k", "flight", "z", "flag"]].to_csv(
+    top = Ws.assign(top1pct=strat).nlargest(2000, "z")
+    top[["bird", "row", "rel_day", "month", "sensitivity_k", "flight", "z", "top1pct"]].to_csv(
         out / f"beh_top_windows_{name}.csv", index=False)
     lev_counts = {int(l_): int((W["level"] == l_).sum()) for l_ in (-1, 0, 1, 2)}
     cols = ["factor", "format_factor", "share_scored", "ratio", "n_flagged_with", "birds_flagged_with"]
@@ -1456,14 +1518,14 @@ def run_behaviour(F: pd.DataFrame, run: Path, s2: Path, s6: Path, out: Path, k: 
         B["rel_day"] = B["day"] - first_day.reindex(B["bird"]).to_numpy()
         # primary flags: 99th percentile per length bin, pooled over birds (bin-neutral by construction);
         # one pooled threshold reported for comparison
-        B["flag_content"], thr_c = stratum_flags(B["content_z"].to_numpy(), B["bin"].to_numpy())
-        B["flag_seq"], thr_s = stratum_flags(B["seq_z"].to_numpy(), B["bin"].to_numpy())
+        B["top1pct_content"], thr_c = stratum_flags(B["content_z"].to_numpy(), B["bin"].to_numpy())
+        B["top1pct_seq"], thr_s = stratum_flags(B["seq_z"].to_numpy(), B["bin"].to_numpy())
         thr_o = stratum_flags(B["order_z"].to_numpy(), B["bin"].to_numpy())[1]
         thr_m = stratum_flags(B["smooth_z"].to_numpy(), B["bin"].to_numpy())[1]
         B.drop(columns=["day"]).to_csv(out / f"beh_bouts_{name}.csv", index=False)
         okc, oks = np.isfinite(B["content_z"]), np.isfinite(B["seq_z"])
         ft = []
-        for sc, fl, ok_ in (("content", "flag_content", okc), ("sequence", "flag_seq", oks)):
+        for sc, fl, ok_ in (("content", "top1pct_content", okc), ("sequence", "top1pct_seq", oks)):
             zc = B[f"{'seq' if sc == 'sequence' else sc}_z"].to_numpy()
             ft.append(factor_table(B[ok_], B.loc[ok_, fl], BOUT_FACTORS).assign(score=sc, threshold="per bin (primary)"))
             ft.append(factor_table(B[ok_], zc[ok_] > np.nanpercentile(zc, FLAG_Q), BOUT_FACTORS).assign(
@@ -1474,7 +1536,7 @@ def run_behaviour(F: pd.DataFrame, run: Path, s2: Path, s6: Path, out: Path, k: 
         pick = lambda sc, th: FT[(FT["score"] == sc) & (FT["threshold"] == th)]  # noqa: E731
         summ["bout"] = {"n_bouts": len(B), "n_scored_content": int(okc.sum()), "n_scored_seq": int(oks.sum()),
                         "n_birds": int(B["bird"].nunique()), "n_by_bin": B["bin"].value_counts().sort_index().tolist(),
-                        "n_flag_content": int(B["flag_content"].sum()), "n_flag_seq": int(B["flag_seq"].sum()),
+                        "n_flag_content": int(B["top1pct_content"].sum()), "n_flag_seq": int(B["top1pct_seq"].sum()),
                         **{f"worst_ratio_{sc}_{t}": worst_format_ratio(pick(sc, th)) for sc in ("content", "sequence")
                            for t, th in (("primary", "per bin (primary)"), ("pooled", "one pooled threshold"))},
                         "factors_content": pick("content", "per bin (primary)")[cols].to_dict("records"),
@@ -1494,16 +1556,17 @@ def run_behaviour(F: pd.DataFrame, run: Path, s2: Path, s6: Path, out: Path, k: 
         Dd["month"] = mo.reindex(pd.MultiIndex.from_arrays([Dd["bird"], Dd["day"]])).to_numpy()
         okd = np.isfinite(Dd["z"])
         thr_d = float(np.nanpercentile(Dd["z"], FLAG_Q))
-        Dd["flag"] = Dd["z"] > thr_d
+        Dd["top1pct"] = Dd["z"] > thr_d
         Dd.drop(columns=["day"]).to_csv(out / f"beh_days_{name}.csv", index=False)
-        ftd = factor_table(Dd[okd], Dd.loc[okd, "flag"], DAY_FACTORS)
+        ftd = factor_table(Dd[okd], Dd.loc[okd, "top1pct"], DAY_FACTORS)
         ftd.to_csv(out / f"beh_day_factors_{name}.csv", index=False)
         summ["day"] = {"n_days": len(Dd), "n_scored": int(okd.sum()), "n_birds": int(Dd["bird"].nunique()),
-                       "n_too_few_days": int((Dd["level"] == -1).sum()), "n_flagged": int(Dd["flag"].sum()),
+                       "n_too_few_days": int((Dd["level"] == -1).sum()), "n_flagged": int(Dd["top1pct"].sum()),
                        "n_partial_days_not_scored": int(sum(r["n_partial_days"] for r in res)),
                        "threshold_z": thr_d, "worst_ratio": worst_format_ratio(ftd),
                        "factors": ftd[["factor", "format_factor", "share_scored", "ratio",
                                        "n_flagged_with"]].to_dict("records")}
+    summ["coverage"] = coverage(F, W, B, Dd if len(Dd) else None)
     # ---- injections
     rows = []
     if len(B) and EXB:
@@ -1561,7 +1624,7 @@ def run_behaviour(F: pd.DataFrame, run: Path, s2: Path, s6: Path, out: Path, k: 
     summ["inject"] = INJ.to_dict("records")
     # ---- blind pages: top content bouts (at most 3 per bird)
     if len(B) and top_bouts:
-        tops = B[B["flag_content"]].sort_values("content_z", ascending=False).groupby("bird", sort=False).head(3)
+        tops = B[B["top1pct_content"]].sort_values("content_z", ascending=False).groupby("bird", sort=False).head(3)
         tops = tops.head(top_bouts).reset_index(drop=True)
         Rmap = {o["bird"]: np.asarray(o["R"], np.float32).reshape(3, 3)
                 for o in json.loads((run / "orientation.json").read_text())} if (run / "orientation.json").exists() else {}
@@ -1582,9 +1645,11 @@ def run_behaviour(F: pd.DataFrame, run: Path, s2: Path, s6: Path, out: Path, k: 
     l2b.to_csv(out / f"l2_cells_{name}.csv", index=False)
     l2s.to_csv(out / f"l2_birds_{name}.csv", index=False)
     l2m.to_csv(out / f"l2_months_{name}.csv", index=False)
-    summ["l2"] = {"n_cells_scored": len(l2b), "n_birds": int(l2b["bird"].nunique()) if len(l2b) else 0,
-                  "n_birds_fixed": int(l2s["l2_score_fixed"].notna().sum()) if len(l2s) else 0,
-                  "n_month_pairs": len(l2m)}
+    summ["l2"] = {"n_cells_scored": len(l2b), "n_cells": int(l2b["cell"].nunique()) if len(l2b) else 0,
+                  "n_birds": int(l2b["bird"].nunique()) if len(l2b) else 0,
+                  "n_birds_scored": int(l2s["l2_score"].notna().sum()) if len(l2s) else 0,
+                  "n_month_pairs": len(l2m),
+                  "n_month_pairs_consecutive": int((l2m["gap_months"] == 1).sum()) if len(l2m) else 0}
     return {"summary": summ, "l2_scores": l2s, "l2_months": l2m}
 
 
@@ -1665,11 +1730,45 @@ def cell_mmd(X: dict, gamma: float, rng) -> dict:
     return out
 
 
+L2_CELL_COLS = ["bird", "cell", "mmd2", "rank_in_cell", "z_across_birds", "n_birds_cell"]
+L2_BIRD_COLS = ["bird", "l2_score", "n_cells"]
+
+
+def l2_bird_scores(jobs: list, res: list) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Cell table and bird scores from per-cell {bird: MMD^2}. Within each cell (>= L2_MIN_BIRDS birds) a bird's
+    position is its rank among the cell's birds as a fraction in (0, 1) ((rank - 0.5) / n), which has the same null
+    distribution in every cell whatever its size (a robust z in a thin cell does not). Bird score = median of its
+    within-cell ranks over its cells (NaN with fewer than L2_MIN_CELLS cells), so no single cell decides it.
+    z_across_birds is kept for reading only."""
+    rows = []
+    for (c, _), r in zip(jobs, res):
+        b_ = list(r)
+        v = np.array([r[b] for b in b_], float)
+        ok = np.isfinite(v)
+        if ok.sum() < L2_MIN_BIRDS:
+            continue
+        rk = np.full(len(v), np.nan)
+        rk[ok] = (stats.rankdata(v[ok]) - 0.5) / ok.sum()
+        med = np.median(v[ok])
+        sc = max(1.4826 * np.median(np.abs(v[ok] - med)), 1e-12)
+        for b, m, q in zip(b_, v, rk):
+            rows.append({"bird": b, "cell": f"{l2_cell_name(c[0])}|{SEASONS[c[1]]}", "mmd2": m, "rank_in_cell": q,
+                         "z_across_birds": (m - med) / sc, "n_birds_cell": int(ok.sum())})
+    Bc = pd.DataFrame(rows, columns=L2_CELL_COLS)
+    srows = []
+    for b, g in Bc.groupby("bird"):
+        q = g["rank_in_cell"].to_numpy(float)
+        q = q[np.isfinite(q)]
+        srows.append({"bird": b, "l2_score": float(np.median(q)) if len(q) >= L2_MIN_CELLS else np.nan,
+                      "n_cells": len(q)})
+    return Bc, pd.DataFrame(srows, columns=L2_BIRD_COLS)
+
+
 def level2(samples: list[dict], msamples: list[dict], birds: list[str], name: str, rng, workers: int, seed: int):
     """Bird x cell MMD^2 z across birds, bird scores (fixed number of cells and all cells), month changes."""
     cells = sorted({c for s in samples for c in s})
     if not cells:
-        return pd.DataFrame(), pd.DataFrame(columns=["bird", "l2_score_fixed", "l2_score_all", "n_cells"]), pd.DataFrame()
+        return pd.DataFrame(columns=L2_CELL_COLS), pd.DataFrame(columns=L2_BIRD_COLS), pd.DataFrame()
     allx = np.concatenate([s[c] for s in samples for c in s]).astype(np.float32)
     fit = allx[rng.choice(len(allx), min(50000, len(allx)), replace=False)]
     pca = PCA(L2_PCS, random_state=seed).fit(fit)
@@ -1681,22 +1780,7 @@ def level2(samples: list[dict], msamples: list[dict], birds: list[str], name: st
             jobs.append((c, X))
     res = Parallel(n_jobs=workers)(delayed(cell_mmd)(X, gamma, np.random.default_rng(seed_of(seed, name, c)))
                                    for c, X in jobs)
-    rows = []
-    for (c, _), r in zip(jobs, res):
-        v = np.array(list(r.values()))
-        med = np.median(v)
-        s = max(1.4826 * np.median(np.abs(v - med)), 1e-12)
-        for b, m in r.items():
-            rows.append({"bird": b, "cell": f"{l2_cell_name(c[0])}|{SEASONS[c[1]]}",
-                         "mmd2": m, "z_across_birds": (m - med) / s, "n_birds_cell": len(r)})
-    Bc = pd.DataFrame(rows)
-    srows = []
-    for b, g in Bc.groupby("bird"):
-        z = g["z_across_birds"].to_numpy()
-        r_ = np.random.default_rng(seed_of(seed, name, b, "fix"))
-        fixed = float(z[r_.choice(len(z), L2_FIX, replace=False)].mean()) if len(z) >= L2_FIX else np.nan
-        srows.append({"bird": b, "l2_score_fixed": fixed, "l2_score_all": float(z.mean()), "n_cells": len(z)})
-    Bs = pd.DataFrame(srows, columns=["bird", "l2_score_fixed", "l2_score_all", "n_cells"])
+    Bc, Bs = l2_bird_scores(jobs, res)
     # month change (equal sizes)
     mrows = []
     for b, ms in zip(birds, msamples):
@@ -1729,7 +1813,10 @@ def level2(samples: list[dict], msamples: list[dict], birds: list[str], name: st
                               "excess": d_ - f_ if np.isfinite(f_) else np.nan})
     M = pd.DataFrame(mrows)
     if len(M):
-        M["z_change"] = M.groupby("cell")["excess"].transform(
+        # only consecutive calendar months (gap 1) are changes; pairs across a gap are kept in the table, unscored
+        M["z_change"] = np.nan
+        c1 = M["gap_months"] == 1
+        M.loc[c1, "z_change"] = M[c1].groupby("cell")["excess"].transform(
             lambda v: (v - v.median()) / max(1.4826 * (v - v.median()).abs().median(), 1e-12))
     return Bc, Bs, M
 
@@ -1741,7 +1828,7 @@ def bird_table(F: pd.DataFrame, reference_csv: Path | None) -> pd.DataFrame:
     g = F.groupby("bird")
     first, last = g["t_start"].min(), g["t_start"].max()
     B = pd.DataFrame({"n_windows": g.size(), "track_days": (last - first).dt.total_seconds() / 86400,
-                      "cohort_2025": (first.dt.year > 2024).astype(float),
+                      "lsh_missing_share": g["lsh_filled"].mean() if "lsh_filled" in F else np.nan,
                       "cont_share": g["sensitivity_k"].apply(lambda s: float((s == 1).mean())),
                       "gps_share": g["gps_fixes"].apply(lambda s: float((s > 0).mean())),
                       "short_share": g["acc_samples"].apply(lambda s: float((s < FULL_SAMPLES).mean()))})
@@ -1749,6 +1836,10 @@ def bird_table(F: pd.DataFrame, reference_csv: Path | None) -> pd.DataFrame:
         from . import reference
 
         ref = reference.load_birds(reference_csv, list(B.index)).set_index("bird")
+        # cohort = the real deployment year (earliest deployment's deploy-on), not the first window's year
+        dep = pd.to_datetime(ref["deploy_on"], utc=True).reindex(B.index)
+        B["deploy_year"] = dep.dt.year.astype(float)
+        B["deploy_month"] = dep.dt.month.astype(float)
         B["sex_f"] = ref["sex"].map({"f": 1.0, "m": 0.0}).reindex(B.index)
         B["migrant"] = ref["migrant"].notna().astype(float).reindex(B.index)
         B["tagged_young"] = ref["tagged_young"].notna().astype(float).reindex(B.index)
@@ -1756,9 +1847,30 @@ def bird_table(F: pd.DataFrame, reference_csv: Path | None) -> pd.DataFrame:
     return B
 
 
-NUISANCE = ["cohort_2025", "track_days", "n_windows", "cont_share", "gps_share", "short_share", "sex_f", "migrant",
-            "tagged_young"]
-CONTROLS = ["track_days", "n_windows"]
+NUISANCE = ["deploy_year", "deploy_month", "track_days", "n_windows", "cont_share", "gps_share", "short_share",
+            "sex_f", "migrant", "tagged_young"]
+CONTROLS = ["track_days", "n_windows", "deploy_year", "deploy_month"]  # rank controls of the partial version
+
+
+def holm(p: np.ndarray) -> np.ndarray:
+    """Holm-adjusted p over the finite entries (NaN stays NaN)."""
+    p = np.asarray(p, float)
+    out = np.full(len(p), np.nan)
+    ok = np.flatnonzero(np.isfinite(p))
+    if not len(ok):
+        return out
+    o = ok[np.argsort(p[ok], kind="stable")]
+    adj = np.minimum(1.0, np.maximum.accumulate(p[o] * (len(o) - np.arange(len(o)))))
+    out[o] = adj
+    return out
+
+
+def fmt_p(p, n_perm: int) -> str:
+    """p for printing: '<= 1/(n_perm+1)' at the permutation floor (M8), 'n/a' when not computed."""
+    if p is None or not np.isfinite(p):
+        return "n/a"
+    floor = 1.0 / (n_perm + 1)
+    return f"<= {floor:.2g}" if p <= floor * (1 + 1e-9) else f"{p:.3g}"
 
 
 def perm_spearman(x: np.ndarray, y: np.ndarray, n_perm: int, rng) -> tuple[float, float, int]:
@@ -1790,6 +1902,27 @@ def partial_spearman(x: np.ndarray, y: np.ndarray, Z: np.ndarray, n_perm: int, r
     return r, float((1 + (np.abs(null) >= abs(r) - 1e-12).sum()) / (n_perm + 1)), int(ok.sum())
 
 
+DESIGN_AUC = 0.9  # shared rule: a binary nuisance separated this well by deployment year or month is not testable
+
+
+def design_auc(B: pd.DataFrame, nu: str) -> float:
+    """For a binary nuisance: the largest separation (AUC folded to >= 0.5) of its two groups by deploy_year or
+    deploy_month; NaN for non-binary nuisances or without deployment data."""
+    if nu not in B or nu in ("deploy_year", "deploy_month"):
+        return np.nan
+    y = B[nu].to_numpy(float)
+    if set(np.unique(y[np.isfinite(y)])) != {0.0, 1.0}:
+        return np.nan
+    best = np.nan
+    for c in ("deploy_year", "deploy_month"):
+        if c in B:
+            x = B[c].to_numpy(float)
+            a = auc(x[y == 1], x[y == 0])
+            if np.isfinite(a):
+                best = np.nanmax([best, max(a, 1 - a)])
+    return float(best)
+
+
 def nuisance_table(B: pd.DataFrame, scores: dict, n_perm: int, rng) -> pd.DataFrame:
     rows = []
     for run_, cols in scores.items():
@@ -1800,13 +1933,19 @@ def nuisance_table(B: pd.DataFrame, scores: dict, n_perm: int, rng) -> pd.DataFr
                 if nu not in B:
                     continue
                 rho, p, n = perm_spearman(B[c].to_numpy(float), B[nu].to_numpy(float), n_perm, rng)
-                ctrl = [x for x in CONTROLS if x != nu]
+                ctrl = [x for x in CONTROLS if x != nu and x in B and B[x].notna().any()]
                 pr, pp, pn = partial_spearman(B[c].to_numpy(float), B[nu].to_numpy(float), B[ctrl].to_numpy(float),
                                               n_perm, rng)
                 rows.append({"run": run_, "score": c, "nuisance": nu, "spearman_rho": rho, "p_perm_birds": p,
                              "n_birds": n, "controls": "+".join(ctrl), "partial_rho": pr, "p_partial": pp,
-                             "n_birds_partial": pn})
-    return pd.DataFrame(rows)
+                             "n_birds_partial": pn, "design_auc": design_auc(B, nu)})
+    T = pd.DataFrame(rows)
+    if len(T):  # family = every testable test of the column in this table
+        T["testable"] = ~(T["design_auc"] >= DESIGN_AUC)
+        for c, h in (("p_perm_birds", "p_holm"), ("p_partial", "p_partial_holm")):
+            T[h] = holm(np.where(T["testable"], T[c].to_numpy(float), np.nan))
+        T["n_perm"] = n_perm
+    return T
 
 
 # ================================================================ driver
@@ -1826,7 +1965,12 @@ def load_bird_frame(d: Path) -> pd.DataFrame | None:
     df["t_start"] = pd.to_datetime(df["t_start"], utc=True)
     df["bird"] = d.name
     df["row"] = np.arange(len(df))
-    df["day"], df["night"] = local_days(df["t_start"], df["local_solar_hour"].to_numpy())
+    off, n_nan = solar_offset(df["t_start"], df["local_solar_hour"].to_numpy())
+    t = df["t_start"]
+    utc_h = (t.dt.hour + t.dt.minute / 60 + t.dt.second / 3600).to_numpy(float)
+    df["lsh_filled"] = ~np.isfinite(df["local_solar_hour"].to_numpy(float))
+    df["local_solar_hour"] = np.where(df["lsh_filled"], (utc_h + off) % 24, df["local_solar_hour"].to_numpy(float))
+    df["day"], df["night"] = local_days(t, df["local_solar_hour"].to_numpy())
     df["month"] = df["t_start"].dt.month
     df["season"] = (df["month"] % 12) // 3
     df["ym"] = df["t_start"].dt.strftime("%Y-%m")
@@ -1857,6 +2001,9 @@ def run(windows: Path, out: Path, runs: list[Path] = (), states2: list[Path] = (
             "windows": str(windows), "k": k, "ref_cap": ref_cap, "min_ref": min_ref, "n_inject": n_inject,
             "seed": seed, "n_perm": n_perm, "parts": list(parts), "n_windows": len(F),
             "n_birds": int(F["bird"].nunique()), "subset_birds": birds is not None,
+            "local_solar_hour_missing": {"n_windows": int(F["lsh_filled"].sum()),
+                                         "share": float(F["lsh_filled"].mean()),
+                                         "n_birds": int(F.loc[F["lsh_filled"], "bird"].nunique())},
             "qc_thresholds": {k_: v for k_, v in globals().items() if k_.isupper() and isinstance(v, (int, float))}}
     if "qc" in parts:
         log("QC")
@@ -1871,12 +2018,11 @@ def run(windows: Path, out: Path, runs: list[Path] = (), states2: list[Path] = (
                                 windows)
             meta["behaviour"][r.name] = res["summary"]
             l2s = res["l2_scores"].set_index("bird")
-            for c in ("l2_score_fixed", "l2_score_all"):
-                birds_tab[f"{c}_{r.name}"] = l2s[c].reindex(birds_tab.index) if c in l2s else np.nan
+            birds_tab[f"l2_score_{r.name}"] = l2s["l2_score"].reindex(birds_tab.index) if len(l2s) else np.nan
             mc = res["l2_months"]
             birds_tab[f"l2_mean_change_{r.name}"] = (mc.groupby("bird")["z_change"].mean().reindex(birds_tab.index)
                                                     if len(mc) else np.nan)
-            scores[r.name] = [f"l2_score_fixed_{r.name}", f"l2_score_all_{r.name}", f"l2_mean_change_{r.name}"]
+            scores[r.name] = [f"l2_score_{r.name}", f"l2_mean_change_{r.name}"]
     birds_tab.reset_index().to_csv(out / "birds.csv", index=False)
     nu = nuisance_table(birds_tab, scores, n_perm, rng)
     nu.to_csv(out / "nuisance.csv", index=False)
@@ -1899,7 +2045,8 @@ def _verdict(factors: list[dict]) -> str:
     parts = [f"{f['factor']}{'*' if f['format_factor'] else ''} {_fmt(f['ratio'])}"
              f"{' (rare)' if f.get('share_scored', 1) < 1e-3 else ''}" for f in factors
              if not f["factor"].startswith("month")]
-    return f"format neutrality {'met' if _neutral(factors) else 'NOT met'}; " + "; ".join(parts)
+    return (f"format neutrality among scored units {'met' if _neutral(factors) else 'NOT met'} (units excluded "
+            "before scoring are not tested by this); " + "; ".join(parts))
 
 
 def _thr(d: dict) -> str:
@@ -1911,7 +2058,15 @@ def write_summary(out: Path, meta: dict, nu: pd.DataFrame) -> None:
          "Two separate products. Part 1 checks the sensors and the recording with fixed rules on the raw data (no "
          "model). Part 2 looks for unusual behaviour with h, using only full windows (>= 190 samples) and comparing "
          "like with like (same bird, recording mode, coarse state, season). Labels: [descriptive] = counted; "
-         "[tested] = permutation test with the bird as the unit.", ""]
+         "[tested] = permutation test with the bird as the unit.", "",
+         "Behavioural 'flags' are the top 1% of each score ranked for inspection (a fixed share by construction), "
+         "not detections: there is no window-level injection, so window ranks have no recall. Bout and day ranks "
+         "have recall only for the h-level injections listed below.", ""]
+    ls = meta.get("local_solar_hour_missing")
+    if ls:
+        L += [f"- local_solar_hour missing on {ls['n_windows']:,} windows ({_fmt(100 * ls['share'])}%, {ls['n_birds']} "
+              "birds); their solar offset is filled from the previous/next window in time (as budgets.py) [descriptive].",
+              ""]
     if meta.get("subset_birds"):
         L += ["**Subset run (not all birds): numbers are a check, not results.**", ""]
     q = meta.get("qc")
@@ -1936,7 +2091,19 @@ def write_summary(out: Path, meta: dict, nu: pd.DataFrame) -> None:
                 L.append(f"  - {r['fault']} / {r['check']} ({r['role']}): {_fmt(r['flag_rate_eligible'])} "
                          f"[{_fmt(r['ci95_lo'])}, {_fmt(r['ci95_hi'])}]; eligible share {_fmt(r['eligible_share'])} of "
                          f"{r['n_injected']} injected windows ({r['n_eligible']} eligible); {r['n_birds']} birds")
-        L.append("- Persistent slips (detected within +-4 nights/days of the onset; clean rate = same test, no slip):")
+        L.append("- Caveat: for stuck_axis, amplitude_half, saturate, gps_speed_zero and gps_spike the injection sets "
+                 "exactly the quantity the check thresholds, so those recalls show the code works, not that real "
+                 "faults of that kind would look like that.")
+        L.append(f"- Persistent slips (detected within +-{SLIP_WIN} nights/days of the onset; clean rate = same test, "
+                 f"no slip). The roost threshold ROOST_CP_DEG = {ROOST_CP_DEG:g} deg was chosen after seeing the clean "
+                 "rate on the real data (15 deg gave 9%) and the injected slips, so the recall below is not an "
+                 "out-of-sample estimate. A yaw slip of 180 deg (rotation about gravity) is invisible to every check: "
+                 "gravity is unchanged and the flapping axis is axial (defined modulo 180 deg).")
+        rs = [r for r in q["slip"] if 20 <= r["deg"] <= 45]
+        for kind in sorted({r["kind"] for r in rs}):
+            k_ = [r for r in rs if r["kind"] == kind]
+            L.append(f"  - {kind}, recall over 20-45 deg: " + ", ".join(f"{r['deg']:g} deg {_fmt(r['recall'])}"
+                                                                         for r in k_))
         for r in q["slip"]:
             L.append(f"  - {r['kind']} {r['deg']:g} deg: recall {_fmt(r['recall'])} [{_fmt(r['ci95_lo'])}, "
                      f"{_fmt(r['ci95_hi'])}], clean rate {_fmt(r['clean_rate_same_positions'])}, {r['n_onsets']} onsets, "
@@ -1946,7 +2113,7 @@ def write_summary(out: Path, meta: dict, nu: pd.DataFrame) -> None:
         w = s["window"]
         L += [f"## Part 2: behaviour, run {name}", "",
               f"- Window level (full windows only): {w['n_scored']:,} of {w['n_full']:,} scored (reference levels "
-              f"{w['levels']}; -1 = unscored). Primary flags: 99th percentile per mode x K=2 state, pooled over birds "
+              f"{w['levels']}; -1 = unscored). Top 1% ranked for inspection: 99th percentile per mode x K=2 state, pooled over birds "
               f"({w['n_flagged']:,} windows, {w['birds_flagged']} birds; thresholds {_thr(w['thresholds_stratum'])}); "
               "mode and state are neutral by construction, the other format factors are a real test [descriptive]:",
               f"  - primary: {_verdict(w['factors_stratum'])}",
@@ -1956,7 +2123,7 @@ def write_summary(out: Path, meta: dict, nu: pd.DataFrame) -> None:
             b = s["bout"]
             L.append(f"- Bout level (continuous mode): {b['n_bouts']:,} bouts of {b['n_birds']} birds (by length bin "
                      f"{b['n_by_bin']}); content scored {b['n_scored_content']:,}, sequence scored "
-                     f"{b['n_scored_seq']:,}. Primary flags: 99th percentile per length bin, pooled over birds "
+                     f"{b['n_scored_seq']:,}. Top 1% ranked for inspection: 99th percentile per length bin, pooled over birds "
                      f"({b['n_flag_content']} content, {b['n_flag_seq']} sequence); bins neutral by construction "
                      "[descriptive]:")
             L.append(f"  - content, primary: {_verdict(b['factors_content'])}")
@@ -1969,8 +2136,21 @@ def write_summary(out: Path, meta: dict, nu: pd.DataFrame) -> None:
                      f">= {DAY_M} full windows over >= {DAY_MIN_HOURS} local hours scored ({d['n_too_few_days']} with fewer than "
                      f"{DAY_MIN_PAIRS} comparable days; {d['n_partial_days_not_scored']:,} days with >= {DAY_M} windows "
                      f"but fewer hours not scored), "
-                     f"{d['n_birds']} birds; one pooled threshold z > {_fmt(d['threshold_z'])} [descriptive]: "
+                     f"{d['n_birds']} birds; top 1% ranked for inspection above one pooled threshold z > {_fmt(d['threshold_z'])}; "
+                     "pairs of days are compared on equal-size samples drawn without replacement within common hours "
+                     "[descriptive]: "
                      f"{_verdict(d['factors'])}")
+        cv = s.get("coverage")
+        if cv:
+            L.append(f"- Not scored [descriptive]: {_fmt(100 * cv['share_windows_no_window_score'])}% of all "
+                     f"{cv['n_windows']:,} windows have no window-level score ({cv['n_short']:,} short windows, "
+                     f"{_fmt(100 * cv['share_short'])}%, excluded by design; {cv['n_full_unscored']:,} full windows "
+                     f"without a reference); {cv['n_bird_days_no_score']:,} of {cv['n_bird_days']:,} bird-days "
+                     f"({_fmt(100 * cv['share_bird_days_no_score'])}%) have no score at any level and "
+                     f"{_fmt(100 * cv['share_bird_days_no_day_score'])}% no day-level score; birds without a score: "
+                     f"any level {cv['n_birds_no_score']}, window {cv['n_birds_no_window_score']}, bout "
+                     f"{cv['n_birds_no_bout_score']}, day {cv['n_birds_no_day_score']} of {cv['n_birds']}. Format "
+                     "neutrality below concerns scored units only.")
         L.append("- Injections (share above the primary threshold of the host's stratum; AUC against the clean "
                  "scores of the same hosts; 95% interval over birds) [descriptive]:")
         for r in s.get("inject", []):
@@ -1978,19 +2158,35 @@ def write_summary(out: Path, meta: dict, nu: pd.DataFrame) -> None:
                      f"[{_fmt(r['ci95_lo'])}, {_fmt(r['ci95_hi'])}], AUC {_fmt(r['auc_vs_clean_hosts'])}, "
                      f"{r['n_scored']} scored, {r['n_birds']} birds")
         l2 = s["l2"]
-        L.append(f"- Level 2: {l2['n_cells_scored']} bird x cell comparisons (window format x mode x state x season, {L2_N} windows "
-                 f"each), {l2['n_birds']} birds; {l2['n_birds_fixed']} birds with >= {L2_FIX} cells (fixed-size "
-                 f"score); {l2['n_month_pairs']} month pairs.")
+        L.append(f"- Level 2: {l2['n_cells_scored']} bird x cell comparisons in {l2['n_cells']} cells with >= "
+                 f"{L2_MIN_BIRDS} birds (window format x mode x state x season, {L2_N} windows each), {l2['n_birds']} "
+                 f"birds; bird score = median within-cell rank (0-1) over its cells, {l2['n_birds_scored']} birds "
+                 f"with >= {L2_MIN_CELLS} cells; {l2['n_month_pairs']} month pairs, of which "
+                 f"{l2['n_month_pairs_consecutive']} consecutive months enter the change score [descriptive].")
         L.append("")
     if len(nu):
-        L += ["## Bird-level scores against nuisance [tested: Spearman and partial Spearman, permutation between birds]",
-              "", "Partial: ranks residualised on the controls (track_days, n_windows; the other one when the "
-              "nuisance is itself a control) by least squares; Pearson r of residuals; p from permuting residuals "
-              "between birds.", "", "| run | score | nuisance | rho | p | partial rho | p | birds |",
-              "|---|---|---|---|---|---|---|---|"]
+        n_perm = int(meta.get("n_perm", 2000))
+        L += ["## Bird-level scores against nuisance [descriptive screen; permutation p between birds, Holm-adjusted]",
+              "", f"{int(nu['p_holm'].notna().sum())} Spearman and {int(nu['p_partial_holm'].notna().sum())} partial "
+              f"testable tests; Holm is applied over all testable tests of each p column in this table. Partial: ranks residualised on "
+              f"the controls ({', '.join(c for c in CONTROLS if nu['controls'].str.contains(c).any())}; the nuisance "
+              "itself is left out of its own controls; deploy_month enters as a linear rank) by least squares; Pearson r of residuals; p "
+              f"from permuting residuals between birds. p at the permutation floor prints as <= 1/({n_perm}+1); a Holm "
+              "value computed from a floor p is an upper bound. "
+              "deploy_year is the real deployment year (earliest deploy-on), used as the cohort. A binary nuisance "
+              f"whose groups deployment year or month separates with AUC >= {DESIGN_AUC:g} is labelled not testable "
+              "in this design.", "",
+              "| run | score | nuisance | rho | p | p Holm | partial rho | p | p Holm | birds |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
         for _, r in nu.iterrows():
+            if not r["testable"]:
+                L.append(f"| {r['run']} | {r['score']} | {r['nuisance']} | {_fmt(r['spearman_rho'])} | not testable in "
+                         f"this design (deployment year/month separate the groups, AUC {_fmt(r['design_auc'])}) | | "
+                         f"{_fmt(r['partial_rho'])} | | | {r['n_birds']} |")
+                continue
             L.append(f"| {r['run']} | {r['score']} | {r['nuisance']} | {_fmt(r['spearman_rho'])} | "
-                     f"{_fmt(r['p_perm_birds'])} | {_fmt(r['partial_rho'])} | {_fmt(r['p_partial'])} | {r['n_birds']} |")
+                     f"{fmt_p(r['p_perm_birds'], n_perm)} | {fmt_p(r['p_holm'], n_perm)} | {_fmt(r['partial_rho'])} | "
+                     f"{fmt_p(r['p_partial'], n_perm)} | {fmt_p(r['p_partial_holm'], n_perm)} | {r['n_birds']} |")
     L += ["", "## Files", "",
           "- qc_inject.csv, qc_slip_inject.csv: QC validation; qc_windows_flagged.parquet, qc_bird_days.csv, "
           "qc_nights.csv, qc_events.csv, qc_birds.csv, qc_timelines/<bird>.png: QC results (relative days).",

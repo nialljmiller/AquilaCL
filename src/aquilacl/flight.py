@@ -9,7 +9,7 @@ directory (state 1 = flight; checked from its state_profiles.csv: state 1 must h
 K=6 states directory (state_hmm, described only by its own state_profiles.csv, never by a hard-coded name: runs
 number states differently). Rows are joined on (bird, row), row being the index within the bird's meta.parquet.
 
-Part A (window scale, flight windows = K=2 ``state`` == 1 by default)
+Part A (window scale, flight windows = K=2 ``state_hmm`` == 1 by default, as in budgets.py)
 - h is L2-normalised. PCA is fitted on a bird-balanced sample (states.balanced_sample: up to ``per_bird`` windows
   per bird, months equally weighted within a bird). The sign of each PC is fixed so that its strongest correlate
   (largest |Spearman rho| on the pooled sample) is positive.
@@ -17,27 +17,36 @@ Part A (window scale, flight windows = K=2 ``state`` == 1 by default)
   decides which windows have GPS, so pooled numbers mix two populations): Spearman rho with speed_mean, climb_mean,
   turn_abs_mean, vedba, flap_band_frac, dom_freq_hz (NaN when acc_samples < 40, as in states.profiles),
   local_solar_hour, hours_from_noon, month, sensitivity_k, acc_samples, each on its pairwise-complete windows of a
-  bird-balanced sample of that subset, with n; eta^2 by bird and by month; R^2 of the PC on sin/cos of hour and of
-  month (circular-linear). Axis label = the three strongest correlates. All descriptive.
+  bird-balanced sample of that subset, with n; variance explained WITHIN the subset's sample; eta^2 by bird and by
+  month; R^2 of the PC on sin/cos of hour and of month (circular-linear). Axis label = the three strongest
+  correlates of that subset with their n (the same PC can mean different things in k0 and k1). All descriptive.
 - Flight maps (descriptive): PC1/PC2 grid; median of each feature per cell (cells with >= MIN_CELL windows);
   bird-weighted density (each bird's density sums to 1, then averaged over birds); female minus male density and
   month minus all-months density, per recording mode. Speed vs climb map (windows with GPS) coloured by median PC.
-- Sex test (TESTED): per bird the mean PC score (birds with >= MIN_BIRD_WINDOWS flight windows in the subset);
-  difference female minus male with a two-sided permutation p (sex labels permuted between birds), Hedges' g,
-  n_f, n_m; Holm correction over all PC x subset tests of a run.
-- With two runs: Spearman between the PCs of the two runs on windows that are flight in both (descriptive).
+- Sex test (TESTED): bird value = mean of the bird's month means (months with >= MIN_BM_WINDOWS windows; birds with
+  >= MIN_BIRD_WINDOWS windows in the subset). Strata = deployment year (reference deploy_on) x age group (tagged
+  young / not stated); statistic = weighted mean of within-stratum female-minus-male differences, two-sided p with
+  sex labels permuted between birds within strata (NaN when no stratum holds both sexes); raw difference, Hedges' g,
+  n_f, n_m, birds in informative strata, and the AUC with which the strata alone separate the sexes (>= 0.9: not
+  testable in this design). Variants: all windows (primary) and full windows only (acc_samples >= FULL_SAMPLES,
+  sensitivity). Holm over all runs x subsets x PCs per variant. p at the floor prints as '<= 1/(n_perm+1)'.
+- With two runs: Spearman between the PCs of the two runs on a bird-balanced sample of windows that are flight in
+  both (descriptive).
 
 Part B (bout scale)
-- A continuous-mode bout is a maximal run of a bird's sensitivity_k == 1 windows in time order with consecutive
-  window starts at most BOUT_STEP_S = 25 s apart (10-s window + gap <= 15 s) and no window of another mode in
-  between. Segments of windows.py break at 1.5 s acceleration gaps and k_in_segment has holes where short windows
-  were dropped, so the time rule, not segment, joins windows. Bouts >= MIN_BOUT_S = 60 s are kept
-  (duration = last start - first start + 10 s; continuous recording is capped near 900 s, so duration is partly a
-  recording setting).
+- Canonical bout (bout_ids; imported by other modules): a maximal run of a bird's sensitivity_k == 1 windows in
+  time order whose consecutive k=1 starts are at most BOUT_STEP_S = 30 s apart; windows of another mode in between do
+  not split it (see bout_ids for the measured evidence). 30 s is the trough of the k=1 step histogram on windows_v4.
+  Segments of windows.py break at 1.5 s acceleration gaps and k_in_segment has holes where short windows were
+  dropped, so the time rule, not segment, joins windows. Bouts >= MIN_BOUT_S = 60 s are kept (duration = last start
+  - first start + last window length acc_samples / 20 Hz; continuous recording is capped near 900 s, so duration is
+  partly a recording setting). bird_coverage.csv gives per-bird counts under this rule and the first run's rule.
 - Descriptors per bout: duration, windows, GPS share, flight share (K=2), mean speed, net climb = sum(climb_mean x
-  10 s) and its first-half / second-half split, climb rate per minute, total absolute turning = sum(turn_abs_mean x
-  n_turn), gross circles = total / 360, net circles = |sum turn_net_deg| / 360, circles per minute, share of each
-  K=6 state, state changes per minute, glide ratio = sum(speed_mean x 10) / sum(-climb_mean x 10) over descending
+  n_speed) (GPS seconds of the window, not 10 s) and its first-half / second-half split, climb rate per minute,
+  gross turning rate = sum(turn_abs_mean x n_turn) per minute (includes heading noise; not called circling), net
+  circles = |sum turn_net_deg| / 360 and net circles per minute (the "circling" word uses this), share of each K=6
+  state (NaN for a bout without K=6 states), state changes per minute, glide ratio = sum(speed_mean x n_speed) /
+  sum(-climb_mean x n_speed) over descending
   windows (climb_mean < -GLIDE_MIN_SINK_MS; NaN below GLIDE_MIN_LOSS_M of height lost; ground speed, so wind is included), flapping share
   (label_flapping, known values), mean flap_band_frac, mean and sd of PC1..5 of part A, h spread
   (1 - |mean unit h|), start month and local solar hour.
@@ -50,14 +59,15 @@ Part B (bout scale)
   written. Types are numbered by ascending median speed.
 - Per type: medians, state shares, transition counts, circular mean start hour, month shares, and bird-level
   female/male and young-tagged/not-stated shares (per-bird share of bouts in the type, birds with >=
-  MIN_BIRD_BOUTS bouts; permutation p between birds, TESTED but exploratory, no correction). Words used for a type
+  MIN_BIRD_BOUTS bouts; permutation p between birds within strata, TESTED but exploratory, no correction). Words used for a type
   come only from fixed numeric rules (WORD_RULES).
 
 Outputs: --out/<run name>/ (csv, png, json) per run, cross_run_pc_spearman.csv, summary.md, metadata.json. Tables
 may be keyed by bird; no position, no exact timestamp is written.
 
 Usage: python -m aquilacl.flight --run R [--run R2] --windows W --states2 S2 [--states2 ...] --states6 S6
-       [--states6 ...] --out NEW [--reference CSV] [--n-boot 20] [--n-perm 2000] [--workers N] [--seed 0] [--umap]
+       [--states6 ...] --out NEW [--reference CSV] [--state-col state_hmm] [--n-boot 100] [--n-perm 2000]
+       [--workers N] [--seed 0] [--umap]
 """
 
 from __future__ import annotations
@@ -77,7 +87,7 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 from . import reference
-from .demography import hedges_g, perm_mean_diff
+from .demography import hedges_g
 from .states import (JACCARD_MIN, SPECTRUM_SAMPLES, balanced_sample, fit_gmm, jaccard_best, joint, onehot,
                      posterior, refit_labels, ward_merge)
 from .substates import presence
@@ -85,8 +95,12 @@ from .substates import presence
 DEFAULT_REFERENCE = Path("/project/ai4wy-eap/nmille39/aquilacl/source/movebank_2026-11-24/"
                          "LifeTrack Golden Eagle Bighorn Basin WY-reference-data(1).csv")
 WINDOW_S = 10.0
-BOUT_STEP_S = 25.0
+FS = 20.0
+BOUT_STEP_S = 30.0  # trough of the k=1 step histogram (mode 22-25 s, tail to 29 s, trough 29-31 s; see bout_ids)
+LEGACY_BOUT_STEP_S = 25.0  # rule of the first run (any other-mode window split a bout); counts only, for reconciliation
 MIN_BOUT_S = 60.0
+FULL_SAMPLES = 190  # full-window sensitivity: acc_samples >= this
+MIN_BM_WINDOWS = 10  # a bird-month enters a bird's mean with >= this many windows
 GLIDE_MIN_LOSS_M = 20.0
 GLIDE_MIN_SINK_MS = 0.5  # a window counts as descending (glide ratio) when climb_mean < -0.5 m/s
 N_PC = 5
@@ -125,16 +139,53 @@ def _read(path: Path, want: list[str]) -> pd.DataFrame:
 # ---------------------------------------------------------------- loading
 
 def bout_ids(t_s: np.ndarray, cont: np.ndarray, max_step: float = BOUT_STEP_S) -> np.ndarray:
-    """Bout id per window of ONE bird in time order (-1 for windows not in continuous mode).
+    """Canonical continuous-mode bout id per window of ONE bird in time order (-1 for windows not in continuous mode).
 
-    A new bout starts at a continuous window whose predecessor is not continuous or starts more than ``max_step``
-    seconds earlier."""
+    Only continuous windows (``cont``) define bouts: a new bout starts at a continuous window whose previous
+    CONTINUOUS window starts more than ``max_step`` seconds earlier. Windows of another mode lying between two
+    continuous windows <= ``max_step`` apart do not split the bout (they keep id -1). Measured on windows_v4 (30 s):
+    20,417 k=0 windows sit inside such runs; 97 % are 40-sample bursts, 3 % have GPS; k=1 steps (10.5-120 s) that
+    contain one k=0 window have median 24.8 s, steps without one 24.0 s, and 10-s cadence resumes after them. They
+    are not scheduled bursts: per bird a median 3 % start within 3 s of the bird's scheduled clock (chance 2 %),
+    against 87 % of k=0 burst starts outside bouts. They are a recording-format interruption, not an end of
+    continuous mode. Other modules (budgets, anomaly) import this function; the signature is fixed."""
+    t_s, cont = np.asarray(t_s, float), np.asarray(cont, bool)
+    out = np.full(len(t_s), -1, np.int64)
+    idx = np.flatnonzero(cont)
+    if len(idx):
+        new = np.r_[True, np.diff(t_s[idx]) > max_step]
+        out[idx] = np.cumsum(new) - 1
+    return out
+
+
+def _legacy_bout_ids(t_s: np.ndarray, cont: np.ndarray, max_step: float = LEGACY_BOUT_STEP_S) -> np.ndarray:
+    """The first run's rule (any window of another mode splits a bout); only for the reconciliation counts."""
     t_s, cont = np.asarray(t_s, float), np.asarray(cont, bool)
     new = cont.copy()
     if len(t_s) > 1:
         new[1:] &= ~cont[:-1] | (np.diff(t_s) > max_step)
-    ids = np.cumsum(new) - 1
-    return np.where(cont, ids, -1)
+    return np.where(cont, np.cumsum(new) - 1, -1)
+
+
+def bout_durations(t_s: np.ndarray, ids: np.ndarray, acc_samples: np.ndarray | None = None) -> np.ndarray:
+    """Duration per bout id 0..n-1: last start - first start + length of the last window (acc_samples / FS, at
+    least 1 s; WINDOW_S when acc_samples is not given). t_s in time order."""
+    ids = np.asarray(ids)
+    m = ids >= 0
+    if not m.any():
+        return np.zeros(0)
+    b, t = ids[m], np.asarray(t_s, float)[m]
+    last_len = (np.maximum(np.asarray(acc_samples, float)[m] / FS, 1.0) if acc_samples is not None
+                else np.full(len(t), WINDOW_S))
+    n = b.max() + 1
+    first = np.full(n, np.inf)
+    np.minimum.at(first, b, t)
+    lastt = np.full(n, -np.inf)
+    np.maximum.at(lastt, b, t)
+    end = np.zeros(n)
+    is_last = t == lastt[b]
+    end[b[is_last]] = t[is_last] + last_len[is_last]
+    return end - first
 
 
 def load_bird(d: Path, run: Path, s2: tuple | None, s6: tuple | None):
@@ -165,14 +216,35 @@ def load_bird(d: Path, run: Path, s2: tuple | None, s6: tuple | None):
     df["bout_local"] = -1
     order = np.argsort(df["t_start"].to_numpy(), kind="stable")
     t_s = (df["t_start"] - df["t_start"].min()).dt.total_seconds().to_numpy()
-    df.loc[order, "bout_local"] = bout_ids(t_s[order], (df["sensitivity_k"].to_numpy() == 1)[order])
+    cont = df["sensitivity_k"].to_numpy() == 1
+    ts_o, c_o, acc_o = t_s[order], cont[order], df["acc_samples"].to_numpy(float)[order]
+    ids = bout_ids(ts_o, c_o)
+    df.loc[order, "bout_local"] = ids
     df["t_s"] = t_s
-    keep = (flight | (df["sensitivity_k"].to_numpy() == 1))
+    dur, leg = bout_durations(ts_o, ids, acc_o), _legacy_bout_ids(ts_o, c_o)
+    dleg = bout_durations(ts_o, leg)  # the first run measured duration as last start - first start + 10 s
+    cover = {"bird": d.name, "windows": n, "k1_windows": int(cont.sum()), "flight_windows": int(flight.sum()),
+             "in_states2": s2 is not None, "in_states6": s6 is not None,
+             "bouts_all": int(len(dur)), "bouts_ge_60s": int((dur >= MIN_BOUT_S).sum()),
+             "legacy_bouts_all": int(len(dleg)), "legacy_bouts_ge_60s": int((dleg >= MIN_BOUT_S).sum()),
+             "k0_inside_bouts": int(_inside(ts_o, c_o, ids))}
+    keep = (flight | cont)
     H = np.asarray(h[keep], np.float32)
     H /= np.maximum(np.linalg.norm(H, axis=1, keepdims=True), 1e-12)
     out = df[keep].reset_index(drop=True)
     out.insert(0, "bird", d.name)
-    return out, H, int(m["t_start"].min().year), n
+    return out, H, int(m["t_start"].min().year), n, cover
+
+
+def _inside(t_s: np.ndarray, cont: np.ndarray, ids: np.ndarray) -> int:
+    """Number of non-continuous windows lying between two continuous windows of the same bout (time order)."""
+    idx = np.flatnonzero(cont)
+    if len(idx) < 2:
+        return 0
+    pos = np.searchsorted(idx, np.flatnonzero(~cont))
+    ok = (pos > 0) & (pos < len(idx))
+    pos = pos[ok]
+    return int((ids[idx[pos - 1]] == ids[idx[pos]]).sum())
 
 
 def _by_bird(path: Path, col: str) -> dict:
@@ -195,20 +267,52 @@ def state_descriptions(states6: Path) -> pd.DataFrame:
     return p[[c for c in cols if c in p]].rename(columns=lambda c: c.replace("_median", "").replace("_mean", ""))
 
 
-def load_run(run: Path, windows: Path, states2: Path, states6: Path, state_col: str, workers: int):
+def deploy_cohort(birdinfo: pd.DataFrame, first_year: dict) -> tuple[dict, int]:
+    """Cohort = year of the bird's earliest reference deploy_on; the first-window year only where deploy_on is
+    missing (returned count)."""
+    dep = birdinfo["deploy_on"] if "deploy_on" in birdinfo else pd.Series(dtype="datetime64[ns, UTC]")
+    out, fallback = {}, 0
+    for b, y in first_year.items():
+        v = dep.get(b, pd.NaT)
+        if pd.notna(v):
+            out[b] = str(pd.Timestamp(v).year)
+        else:
+            out[b] = str(y)
+            fallback += 1
+    return out, fallback
+
+
+def load_run(run: Path, windows: Path, states2: Path, states6: Path, state_col: str, workers: int,
+             birdinfo: pd.DataFrame):
     s2, s6 = _by_bird(states2, state_col), _by_bird(states6, "state_hmm")
     dirs = sorted(p for p in windows.iterdir() if p.is_dir())
     res = Parallel(n_jobs=workers)(delayed(load_bird)(d, run, s2.get(d.name), s6.get(d.name)) for d in dirs)
+    n_empty = sum(r is None for r in res)
     res = [r for r in res if r is not None]
     D = pd.concat([r[0] for r in res], ignore_index=True)
     H = np.concatenate([r[1] for r in res])
-    first_year = {r[0]["bird"].iat[0]: r[2] for r in res if len(r[0])}
-    D["cohort"] = D["bird"].map(lambda b: "2024" if first_year[b] <= 2024 else "2025")
+    cover = pd.DataFrame([r[4] for r in res])
+    first_year = {r[4]["bird"]: r[2] for r in res}
+    cohort, fallback = deploy_cohort(birdinfo, first_year)
+    D["cohort"] = D["bird"].map(cohort)
+    cover["cohort"] = cover["bird"].map(cohort)
     D["month"] = D["t_start"].dt.month
     lsh = D["local_solar_hour"]
     D["hours_from_noon"] = np.abs(lsh % 24.0 - 12.0)
     D.loc[D["acc_samples"] < SPECTRUM_SAMPLES, ["flap_band_frac", "dom_freq_hz"]] = np.nan
-    return D, H, {"windows_total": int(sum(r[3] for r in res)), "birds": int(len(res))}
+    counts = {"windows_total": int(sum(r[3] for r in res)), "birds": int(len(res)),
+              "bird_dirs_without_windows": int(n_empty),
+              "birds_missing_from_states2": int((~cover["in_states2"]).sum()),
+              "birds_missing_from_states6": int((~cover["in_states6"]).sum()),
+              "birds_without_flight_windows": int((cover["flight_windows"] == 0).sum()),
+              "birds_with_k1_windows": int((cover["k1_windows"] > 0).sum()),
+              "cohort_from_first_window_year": int(fallback),
+              "cohort_birds": {k: int(v) for k, v in cover["cohort"].value_counts().sort_index().items()}}
+    log(f"{run.name}: {counts['birds']} birds with windows ({n_empty} bird directories without windows); missing from "
+        f"K=2 states {counts['birds_missing_from_states2']}, from K=6 states {counts['birds_missing_from_states6']}; "
+        f"{counts['birds_without_flight_windows']} birds without K=2 flight windows; cohort from first-window year "
+        f"(no deploy_on) for {fallback} birds")
+    return D, H, counts, cover
 
 
 # ---------------------------------------------------------------- statistics helpers
@@ -285,13 +389,17 @@ def fit_axes(F: pd.DataFrame, HF: np.ndarray, per_bird: int, rng, seed: int):
     return pca, Z, fit
 
 
-def axis_tables(F: pd.DataFrame, Z: np.ndarray, pca: PCA, per_bird: int, rng) -> tuple[pd.DataFrame, pd.DataFrame]:
+def axis_tables(F: pd.DataFrame, Z: np.ndarray, HF: np.ndarray, pca: PCA, per_bird: int, rng
+                ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Correlates (with n) and summaries of each PC per subset. variance_explained is the PC's share of the total
+    variance of unit h WITHIN the subset's bird-balanced sample (the pooled fit value is variance_explained_fit)."""
     corr, summ = [], []
     for sub in SUBSETS:
         mask = _subset_mask(F, sub)
         if mask.sum() < 3:
             continue
         smp = balanced_sample(F, mask, per_bird, rng)
+        total_var = float(np.var(HF[smp].astype(np.float64), axis=0).sum())
         for i in range(Z.shape[1]):
             z = Z[smp, i]
             rows = []
@@ -301,40 +409,147 @@ def axis_tables(F: pd.DataFrame, Z: np.ndarray, pca: PCA, per_bird: int, rng) ->
             corr += rows
             top = sorted((r for r in rows if np.isfinite(r["spearman"]) and r["n"] >= 30),
                          key=lambda r: -abs(r["spearman"]))[:3]
-            summ.append({"subset": sub, "pc": i + 1, "variance_explained": float(pca.explained_variance_ratio_[i]),
+            summ.append({"subset": sub, "pc": i + 1,
+                         "variance_explained": float(np.var(z.astype(np.float64)) / total_var) if total_var > 0 else np.nan,
+                         "variance_explained_fit": float(pca.explained_variance_ratio_[i]),
                          "windows_sample": int(len(smp)), "birds": int(F["bird"].iloc[smp].nunique()),
                          "eta2_bird": eta2(z, F["bird"].to_numpy()[smp]),
                          "eta2_month": eta2(z, F["month"].to_numpy()[smp]),
                          "circ_r2_hour": circ_r2(z, F["local_solar_hour"].to_numpy()[smp], 24.0),
                          "circ_r2_month": circ_r2(z, F["month"].to_numpy()[smp] - 0.5, 12.0),
-                         "label": ", ".join(f"{r['variable']} {r['spearman']:+.2f}" for r in top)})
+                         "label": ", ".join(f"{r['variable']} {r['spearman']:+.2f} (n={r['n']:,})" for r in top)})
     return pd.DataFrame(corr), pd.DataFrame(summ)
 
 
-def sex_tests(F: pd.DataFrame, Z: np.ndarray, sex: pd.Series, n_perm: int, rng) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Bird mean PC scores per subset and female-minus-male permutation tests between birds."""
+def strat_perm_diff(v: np.ndarray, lab: np.ndarray, strata, n_perm: int, rng) -> dict:
+    """Group 1 minus group 0 within strata: weighted mean of the per-stratum differences of means (weights
+    n1 n0 / (n1 + n0)) over the strata that hold both groups, with a two-sided permutation p (labels permuted between
+    birds within strata). Birds in strata holding one group only do not enter. NaN when no stratum holds both."""
+    v, lab = np.asarray(v, float), np.asarray(lab, int)
+    codes = pd.factorize(pd.Series(np.asarray(strata, object)).astype(str))[0]
+    inf = [c for c in np.unique(codes) if 0 < lab[codes == c].sum() < (codes == c).sum()]
+    res = {"diff_strat": np.nan, "p_perm": np.nan, "n_informative": 0, "strata_informative": len(inf)}
+    if not inf:
+        return res
+    keep = np.isin(codes, inf)
+    v, lab, codes = v[keep], lab[keep], codes[keep]
+    res["n_informative"] = int(keep.sum())
+    groups = [np.flatnonzero(codes == c) for c in inf]
+
+    def stat(L):
+        tot, wsum = 0.0, 0.0
+        for ix in groups:
+            L1 = L[:, ix].astype(float)
+            n1 = L1.sum(1)
+            n0 = len(ix) - n1
+            d = L1 @ v[ix] / n1 - (1 - L1) @ v[ix] / n0
+            w = n1 * n0 / len(ix)
+            tot, wsum = tot + w * d, wsum + w
+        return tot / wsum
+
+    obs = float(stat(lab[None, :])[0])
+    L = np.tile(lab, (n_perm, 1))
+    for ix in groups:
+        L[:, ix] = lab[ix][np.argsort(rng.random((n_perm, len(ix))), axis=1)]
+    null = stat(L)
+    res["diff_strat"] = obs
+    res["p_perm"] = float((1 + (np.abs(null) >= abs(obs) - 1e-12).sum()) / (1 + n_perm))
+    return res
+
+
+def auc(score: np.ndarray, lab: np.ndarray) -> float:
+    """Area under the ROC curve of ``score`` for lab == 1 (ties count half)."""
+    score, lab = np.asarray(score, float), np.asarray(lab, int)
+    n1, n0 = int(lab.sum()), int((1 - lab).sum())
+    if not n1 or not n0:
+        return np.nan
+    r = stats.rankdata(score)
+    return float((r[lab == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
+
+
+def nuisance_auc(lab: np.ndarray, strata) -> float:
+    """How well the strata alone separate the groups: AUC of each bird's stratum share of group 1 (in sample)."""
+    st = pd.Series(np.asarray(strata, object)).astype(str)
+    share = pd.Series(np.asarray(lab, float)).groupby(st.to_numpy()).transform("mean").to_numpy()
+    a = auc(share, lab)
+    return float(max(a, 1 - a)) if np.isfinite(a) else np.nan
+
+
+def bird_month_means(F: pd.DataFrame, Z: np.ndarray, mask: np.ndarray) -> pd.DataFrame:
+    """Per bird: mean over its bird-months (>= MIN_BM_WINDOWS windows each) of the month-mean PC scores; birds with
+    >= MIN_BIRD_WINDOWS windows in the mask and at least one such month."""
+    pcs = [f"pc{i + 1}" for i in range(Z.shape[1])]
+    df = pd.DataFrame(Z[mask], columns=pcs)
+    df["bird"] = F["bird"].to_numpy()[mask]
+    df["ym"] = (F["t_start"].dt.year * 100 + F["t_start"].dt.month).to_numpy()[mask]
+    g = df.groupby(["bird", "ym"])
+    cell = g[pcs].mean()
+    cell["n"] = g.size()
+    tot = df.groupby("bird").size()
+    cell = cell[cell["n"] >= MIN_BM_WINDOWS]
+    bm = cell.groupby(level="bird")[pcs].mean()
+    bm["months"] = cell.groupby(level="bird").size()
+    bm["windows"] = tot.reindex(bm.index)
+    return bm[bm["windows"] >= MIN_BIRD_WINDOWS]
+
+
+SEX_VARIANTS = {"all": None, "full": FULL_SAMPLES}  # all windows; full windows only (acc_samples >= FULL_SAMPLES)
+
+
+def sex_tests(F: pd.DataFrame, Z: np.ndarray, birdinfo: pd.DataFrame, n_perm: int, rng,
+              labels: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Female minus male along each PC, per window variant and recording-mode subset. Bird value = mean of its
+    bird-month means. Strata = deployment year x age group (tagged young / not stated); labels are permuted between
+    birds within strata (strat_perm_diff). Also the raw difference, Hedges g of the bird values and the AUC with
+    which the strata alone separate the sexes (>= 0.9: not testable in this design). ``labels``: (subset, pc) ->
+    the axis label of that subset (its own strongest correlates)."""
+    sex = birdinfo["sex"]
+    young = birdinfo["tagged_young"].map(lambda x: "young" if x == True else "not stated")  # noqa: E712
+    cohort = F.groupby("bird")["cohort"].first()
     means, rows = [], []
-    for sub in SUBSETS:
-        mask = _subset_mask(F, sub)
-        g = pd.DataFrame(Z[mask], columns=[f"pc{i + 1}" for i in range(Z.shape[1])]).groupby(F["bird"].to_numpy()[mask])
-        bm = g.mean()
-        bm["windows"] = g.size()
-        bm = bm[bm["windows"] >= MIN_BIRD_WINDOWS]
-        bm["subset"], bm["sex"] = sub, sex.reindex(bm.index).to_numpy()
-        means.append(bm.rename_axis("bird").reset_index())
-        known = bm[bm["sex"].isin(["f", "m"])]
-        lab = (known["sex"] == "f").to_numpy().astype(int)
-        for i in range(Z.shape[1]):
-            v = known[f"pc{i + 1}"].to_numpy(float)
-            row = {"subset": sub, "pc": i + 1, "n_f": int(lab.sum()), "n_m": int((1 - lab).sum())}
-            if row["n_f"] >= 3 and row["n_m"] >= 3:
-                d, p = perm_mean_diff(v, lab, n_perm, rng)
-                row.update(diff_f_minus_m=d, hedges_g=hedges_g(v[lab == 1], v[lab == 0]), p_perm=p)
-            rows.append(row)
-    t = pd.DataFrame(rows)
-    if "p_perm" in t:
-        t["p_holm"] = holm(t["p_perm"].to_numpy())
-    return t, pd.concat(means, ignore_index=True) if means else pd.DataFrame()
+    acc = F["acc_samples"].to_numpy(float)
+    for var, thr in SEX_VARIANTS.items():
+        for sub in SUBSETS:
+            mask = _subset_mask(F, sub) & (acc >= thr if thr is not None else True)
+            bm = bird_month_means(F, Z, mask)
+            bm["variant"], bm["subset"] = var, sub
+            bm["sex"] = sex.reindex(bm.index).to_numpy()
+            bm["stratum"] = (cohort.reindex(bm.index).astype(str) + "|" + young.reindex(bm.index).astype(str)).to_numpy()
+            means.append(bm.rename_axis("bird").reset_index())
+            known = bm[bm["sex"].isin(["f", "m"])]
+            lab = (known["sex"] == "f").to_numpy().astype(int)
+            strata = known["stratum"].to_numpy()
+            for i in range(Z.shape[1]):
+                v = known[f"pc{i + 1}"].to_numpy(float)
+                row = {"variant": var, "subset": sub, "pc": i + 1, "n_f": int(lab.sum()), "n_m": int((1 - lab).sum()),
+                       "axis_label": (labels or {}).get((sub, i + 1), "")}
+                if row["n_f"] >= 3 and row["n_m"] >= 3:
+                    r = strat_perm_diff(v, lab, strata, n_perm, rng)
+                    row.update(diff_f_minus_m=float(v[lab == 1].mean() - v[lab == 0].mean()),
+                               hedges_g=hedges_g(v[lab == 1], v[lab == 0]), nuisance_auc=nuisance_auc(lab, strata), **r)
+                    row["testable"] = bool(row["nuisance_auc"] < 0.9 and np.isfinite(r["p_perm"]))
+                else:
+                    row.update(testable=False, n_informative=0)
+                rows.append(row)
+    return pd.DataFrame(rows), pd.concat(means, ignore_index=True) if means else pd.DataFrame()
+
+
+def holm_family(tests: list[pd.DataFrame]) -> None:
+    """Holm in place over all runs per variant: the primary family is variant 'all' (every run x subset x PC
+    row); variant 'full' is a sensitivity family of its own. Untestable rows (NaN p or nuisance AUC >= 0.9) are
+    outside the family."""
+    allt = pd.concat([t.assign(_run=i, _row=np.arange(len(t))) for i, t in enumerate(tests)], ignore_index=True)
+    if "p_perm" not in allt:
+        allt["p_perm"] = np.nan
+    allt["p_holm"] = np.nan
+    for var in allt["variant"].unique():
+        sel = (allt["variant"] == var) & allt["testable"].fillna(False).astype(bool)
+        allt.loc[sel, "p_holm"] = holm(allt.loc[sel, "p_perm"].to_numpy())
+        allt.loc[allt["variant"] == var, "holm_family_size"] = int(sel.sum())
+    for i, t in enumerate(tests):
+        a = allt[allt["_run"] == i].sort_values("_row")
+        t["p_holm"] = a["p_holm"].to_numpy()
+        t["holm_family_size"] = a["holm_family_size"].to_numpy()
 
 
 def _grid(F: pd.DataFrame, Z: np.ndarray, fit: np.ndarray):
@@ -512,15 +727,22 @@ def bout_table(B: pd.DataFrame, Zb: np.ndarray, Hb: np.ndarray, K6: int) -> pd.D
     i = B["_i"].to_numpy()
     Zb, Hb = Zb[i], Hb[i]
     g = B.groupby("bout", sort=True)
-    t0, t1 = g["t_s"].transform("min"), g["t_s"].transform("max")
-    mid = (t0 + t1 + WINDOW_S) / 2
-    climb_m = B["climb_mean"] * WINDOW_S
-    first = (B["t_s"] + WINDOW_S / 2) < mid
+    wlen = (np.maximum(B["acc_samples"].to_numpy(float) / FS, 1.0) if "acc_samples" in B
+            else np.full(len(B), WINDOW_S))
+    t_end = pd.Series(B["t_s"].to_numpy() + wlen, index=B.index)
+    last = B["t_s"] == g["t_s"].transform("max")
+    dur = t_end.where(last).groupby(B["bout"]).max() - g["t_s"].min()
+    t0 = g["t_s"].transform("min")
+    mid = t0 + dur.reindex(B["bout"]).to_numpy() / 2
+    # GPS seconds per window: n_speed fixes at 1 Hz (a 64-sample tail with 3 fixes covers 3 s, not 10 s)
+    gps_s = B["n_speed"].astype(float).where(B["n_speed"] > 0)
+    climb_m = B["climb_mean"] * gps_s
+    first = (B["t_s"] + wlen / 2) < mid
     desc = (B["climb_mean"] < -GLIDE_MIN_SINK_MS) & B["speed_mean"].notna()
     turn_abs = B["turn_abs_mean"] * B["n_turn"]
     T = pd.DataFrame({
         "bird": g["bird"].first(), "cohort": g["cohort"].first(), "t_start": g["t_start"].min(),
-        "windows": g.size(), "duration_s": g["t_s"].max() - g["t_s"].min() + WINDOW_S,
+        "windows": g.size(), "duration_s": dur,
         "gps_share": g["n_speed"].apply(lambda s: float((s > 0).mean())),
         "flight_share": g["flight"].mean(), "speed_mean": g["speed_mean"].mean(),
         "net_climb_m": climb_m.groupby(B["bout"]).sum(min_count=1),
@@ -531,21 +753,23 @@ def bout_table(B: pd.DataFrame, Zb: np.ndarray, Hb: np.ndarray, K6: int) -> pd.D
         "flap_share": g["label_flapping"].mean(), "flap_band_frac_mean": g["flap_band_frac"].mean(),
         "start_hour": g["local_solar_hour"].first(), "month": g["month"].first(),
     })
-    dist = (B["speed_mean"] * WINDOW_S).where(desc).groupby(B["bout"]).sum(min_count=1)
+    dist = (B["speed_mean"] * gps_s).where(desc).groupby(B["bout"]).sum(min_count=1)
     loss = (-climb_m).where(desc).groupby(B["bout"]).sum(min_count=1)
     T["height_lost_m"] = loss
     T["glide_ratio"] = (dist / loss).where(loss >= GLIDE_MIN_LOSS_M)
     minutes = T["duration_s"] / 60.0
     T["log_duration"] = np.log10(T["duration_s"])
     T["climb_rate_m_min"] = T["net_climb_m"] / minutes
-    T["circles_gross"] = T["turn_abs_total_deg"] / 360.0
+    # gross absolute turning includes GPS heading noise (5.6 deg/s of jitter on straight flight reads as 0.84
+    # "circles"/min), so it is reported only as a turning rate; circles are net turning (direction changes cancel)
+    T["turn_gross_deg_per_min"] = T["turn_abs_total_deg"] / minutes
     T["circles_net"] = T["turn_net_deg"].abs() / 360.0
-    T["circles_per_min"] = T["circles_gross"] / minutes
+    T["circles_per_min"] = T["circles_net"] / minutes
     st = B["state6"].to_numpy()
     has = st >= 0  # windows without a K=6 state do not count in the shares
     sh = pd.crosstab(B["bout"].to_numpy()[has], st[has], normalize="index").reindex(index=T.index, columns=range(K6))
     for s in range(K6):
-        T[f"share_state_{s}"] = sh[s].reindex(T.index).fillna(0.0).to_numpy()
+        T[f"share_state_{s}"] = sh[s].reindex(T.index).to_numpy()  # NaN for a bout without any K=6 state
     b = B["bout"].to_numpy()
     same = (b[1:] == b[:-1]) & (st[1:] >= 0) & (st[:-1] >= 0)
     change = same & (st[1:] != st[:-1])
@@ -620,17 +844,22 @@ def cluster_bouts(T: pd.DataFrame, cols: list[str], per_bird: int, k_over: int, 
 
 
 def _share_test(T: pd.DataFrame, birdinfo: pd.DataFrame, col: str, positive, n_perm: int, rng, K: int) -> list[dict]:
-    """Per type: per-bird share of bouts in the type, mean in group 1 vs group 0, permutation p between birds."""
+    """Per type: per-bird share of bouts in the type, mean in group 1 vs group 0, permutation p between birds within
+    strata (sex: deployment year x age group; young-tagged: deployment year)."""
     counts = pd.crosstab(T["bird"], T["bout_type"]).reindex(columns=range(K), fill_value=0)
     counts = counts[counts.sum(axis=1) >= MIN_BIRD_BOUTS]
     share = counts.div(counts.sum(axis=1), axis=0)
     grp = birdinfo[col].reindex(share.index)
+    cohort = T.groupby("bird")["cohort"].first().reindex(share.index).astype(str)
+    young = birdinfo["tagged_young"].reindex(share.index).map(lambda x: "young" if x == True else "not stated")  # noqa: E712
     if positive == "f":
         known = grp.isin(["f", "m"])
         lab = (grp[known] == "f").astype(int).to_numpy()
+        strata = (cohort + "|" + young)[known].to_numpy()
     else:
         known = pd.Series(True, index=share.index)
         lab = (grp == True).astype(int).to_numpy()  # noqa: E712  (True vs NaN = not stated)
+        strata = cohort.to_numpy()
     share = share[known.to_numpy()]
     out = []
     for t in range(K):
@@ -639,8 +868,10 @@ def _share_test(T: pd.DataFrame, birdinfo: pd.DataFrame, col: str, positive, n_p
         r["mean_share_1"] = float(v[lab == 1].mean()) if r["n_1"] else np.nan
         r["mean_share_0"] = float(v[lab == 0].mean()) if r["n_0"] else np.nan
         if K > 1 and r["n_1"] >= 3 and r["n_0"] >= 3:
-            r["diff"], r["p_perm"] = perm_mean_diff(v, lab, n_perm, rng)
-            r["hedges_g"] = hedges_g(v[lab == 1], v[lab == 0])
+            st = strat_perm_diff(v, lab, strata, n_perm, rng)
+            r.update(diff=float(v[lab == 1].mean() - v[lab == 0].mean()), diff_strat=st["diff_strat"],
+                     p_perm=st["p_perm"], n_informative=st["n_informative"], nuisance_auc=nuisance_auc(lab, strata),
+                     hedges_g=hedges_g(v[lab == 1], v[lab == 0]))
         out.append(r)
     return out
 
@@ -712,8 +943,10 @@ def part_b(D: pd.DataFrame, Zall: np.ndarray, H: np.ndarray, sdesc: pd.DataFrame
     n_all = len(T)
     T = T[T["duration_s"] >= MIN_BOUT_S]
     info = {"bouts_all": int(n_all), "bouts_ge_60s": int(len(T)), "birds_with_bouts": int(T["bird"].nunique()),
-            "bout_definition": f"sensitivity_k == 1 windows, consecutive starts <= {BOUT_STEP_S} s apart, no other "
-                               f"mode between; kept if duration >= {MIN_BOUT_S} s",
+            "bout_definition": f"flight.bout_ids: sensitivity_k == 1 windows with consecutive k=1 starts <= "
+                               f"{BOUT_STEP_S:g} s apart (windows of another mode in between do not split a bout); "
+                               f"duration = last start - first start + last window length (acc_samples / {FS:g} Hz); "
+                               f"kept if duration >= {MIN_BOUT_S:g} s",
             "duration_s_quantiles": T["duration_s"].quantile([0.1, 0.5, 0.9]).round(1).tolist() if len(T) else []}
     if len(T) < 30 or T["bird"].nunique() < 3:
         info["note"] = "too few bouts to cluster"
@@ -731,7 +964,7 @@ def part_b(D: pd.DataFrame, Zall: np.ndarray, H: np.ndarray, sdesc: pd.DataFrame
     trans = transition_counts(B[B["bout"].isin(T.index)], T["bout_type"], K6)
     trans.to_csv(out / "bout_type_transitions.csv", index=False)
     desc = ["duration_s", "windows", "gps_share", "flight_share", "speed_mean", "net_climb_m", "climb_first_half_m",
-            "climb_second_half_m", "climb_rate_m_min", "circles_gross", "circles_net", "circles_per_min",
+            "climb_second_half_m", "climb_rate_m_min", "turn_gross_deg_per_min", "circles_net", "circles_per_min",
             "state_changes_per_min", "glide_ratio", "height_lost_m", "flap_share", "flap_band_frac_mean", "h_spread"] + \
         [f"pc{k}_mean" for k in range(1, Zall.shape[1] + 1)]
     g = T.groupby("bout_type")
@@ -768,19 +1001,21 @@ def run_one(run: Path, states2: Path, states6: Path, windows: Path, birdinfo: pd
     sdesc = state_descriptions(states6)
     sdesc.to_csv(out / "k6_state_profiles_used.csv")
     log(f"{run.name}: loading")
-    D, H, counts = load_run(run, windows, states2, states6, a.state_col, a.workers)
+    D, H, counts, cover = load_run(run, windows, states2, states6, a.state_col, a.workers, birdinfo)
+    cover.to_csv(out / "bird_coverage.csv", index=False)  # bird-keyed counts (windows, states, bouts both rules)
+    counts["bout_counts"] = bout_count_summary(cover)
     fl = D["flight"].to_numpy()
     F, HF = D[fl].reset_index(drop=True), H[fl]
     log(f"{run.name}: {len(F):,} flight windows of {F['bird'].nunique()} birds; {int((D['sensitivity_k'] == 1).sum()):,} "
         "continuous-mode windows")
     pca, Z, fit = fit_axes(F, HF, a.per_bird, rng, a.seed)
-    corr, summ = axis_tables(F, Z, pca, a.per_bird, rng)
+    corr, summ = axis_tables(F, Z, HF, pca, a.per_bird, rng)
     corr.to_csv(out / "axis_correlations.csv", index=False)
     summ.to_csv(out / "axis_summary.csv", index=False)
     sex = birdinfo["sex"]
-    tests, bmeans = sex_tests(F, Z, sex, a.n_perm, rng)
-    tests.to_csv(out / "sex_tests_axes.csv", index=False)
-    bmeans.to_csv(out / "bird_pc_means.csv", index=False)
+    labels = {(r["subset"], r["pc"]): r["label"] for r in summ.to_dict(orient="records")}
+    tests, bmeans = sex_tests(F, Z, birdinfo, a.n_perm, rng, labels)
+    bmeans.to_csv(out / "bird_pc_means.csv", index=False)  # sex_tests_axes.csv is written after Holm over runs
     maps = flight_maps(F, Z, fit, sex, out)
     umap_note = umap_figure(F, HF, a.umap_per_bird, rng, a.seed, out) if a.umap else "not requested"
     Zall = pca.transform(H).astype(np.float32)  # PC signs are folded into pca.components_ by fit_axes
@@ -790,11 +1025,25 @@ def run_one(run: Path, states2: Path, states6: Path, windows: Path, birdinfo: pd
            **counts, "flight_windows": int(len(F)), "flight_windows_k0": int((F["sensitivity_k"] == 0).sum()),
            "flight_windows_k1": int((F["sensitivity_k"] == 1).sum()), "flight_birds": int(F["bird"].nunique()),
            "pca_fit_sample": int(len(fit)), "variance_explained": pca.explained_variance_ratio_.round(4).tolist(),
-           "axis_summary": summ.to_dict(orient="records"), "sex_tests": tests.to_dict(orient="records"),
+           "axis_summary": summ.to_dict(orient="records"), "sex_tests": tests,
            "maps": maps, "umap": umap_note, "bouts": binfo, "k6_states": sdesc.round(3).reset_index().to_dict("records")}
-    (out / "flight.json").write_text(json.dumps(res, indent=1, default=_json))
     keys = F[["bird", "row"]].copy()
     return res, keys, Z
+
+
+def bout_count_summary(cover: pd.DataFrame) -> dict:
+    """Bout counts and birds under the canonical rule and the first run's rule (counts only)."""
+    def q(x):
+        return [float(v) for v in np.quantile(x, [0, 0.5, 1])] if len(x) else []
+    k1 = cover[cover["k1_windows"] > 0]
+    return {"birds_with_k1_windows": int(len(k1)),
+            "canonical": {"bouts": int(cover["bouts_all"].sum()), "bouts_ge_60s": int(cover["bouts_ge_60s"].sum()),
+                          "birds_ge_60s": int((cover["bouts_ge_60s"] > 0).sum()),
+                          "per_bird_ge_60s_min_median_max": q(k1["bouts_ge_60s"])},
+            "legacy": {"bouts": int(cover["legacy_bouts_all"].sum()), "bouts_ge_60s": int(cover["legacy_bouts_ge_60s"].sum()),
+                       "birds_ge_60s": int((cover["legacy_bouts_ge_60s"] > 0).sum()),
+                       "per_bird_ge_60s_min_median_max": q(k1["legacy_bouts_ge_60s"])},
+            "other_mode_windows_inside_bouts": int(cover["k0_inside_bouts"].sum())}
 
 
 def _json(o):
@@ -810,11 +1059,16 @@ def _json(o):
 
 
 def cross_run(keys: list, Zs: list, names: list, rng, n_max: int = 200_000) -> pd.DataFrame:
+    """Spearman between the PCs of two runs on windows that are flight in both; bird-balanced sample (at most
+    n_max / birds windows per bird)."""
     a = keys[0].assign(i=np.arange(len(keys[0])))
     b = keys[1].assign(j=np.arange(len(keys[1])))
     m = a.merge(b, on=["bird", "row"])
-    if len(m) > n_max:
-        m = m.iloc[np.sort(rng.choice(len(m), n_max, replace=False))]
+    if len(m):
+        cap = max(1, n_max // m["bird"].nunique())
+        pick = [g.index.to_numpy() if len(g) <= cap else rng.choice(g.index.to_numpy(), cap, replace=False)
+                for _, g in m.groupby("bird")]
+        m = m.loc[np.sort(np.concatenate(pick))]
     rows = []
     for p in range(Zs[0].shape[1]):
         for q in range(Zs[1].shape[1]):
@@ -827,73 +1081,123 @@ def _f(x, nd=2):
     return "NA" if x is None or (isinstance(x, float) and not np.isfinite(x)) else f"{x:.{nd}f}"
 
 
+def _fp(p, n_perm: int) -> str:
+    """Permutation p; at the floor 1/(n_perm + 1) it is printed as '<= 1/(n_perm+1)'."""
+    if p is None or (isinstance(p, float) and not np.isfinite(p)):
+        return "NA"
+    return f"<= 1/{n_perm + 1}" if p <= 1.0 / (n_perm + 1) + 1e-12 else f"{p:.4f}"
+
+
 def write_summary(out: Path, results: list[dict], cross: pd.DataFrame | None, meta: dict) -> None:
+    n_perm = int(meta.get("args", {}).get("n_perm", 2000))
     L = ["# Flight continuum and flight bouts", "",
-         "Descriptive unless marked TESTED. Every test uses the bird as the unit (bird means; labels permuted between "
+         "Descriptive unless marked TESTED. Every test uses the bird as the unit (bird values; labels permuted between "
          "birds). Recording mode matters: scheduled-mode (k=0) flight windows have almost no GPS and continuous-mode "
-         "(k=1) windows almost always have it, so every axis is also reported per mode.", ""]
+         "(k=1) windows almost always have it, so every axis is also reported per mode. In k=0, correlates with "
+         "speed and climb come from the few k=0 windows that have GPS (a selected subset; see n).", ""]
     if meta.get("reference_note"):
         L += [f"Reference data: {meta['reference_note']}", ""]
     for r in results:
+        bc = r.get("bout_counts", {})
         L += [f"## Run {r['run']}", "",
+              f"- Birds: {r['birds']} with windows ({r.get('bird_dirs_without_windows', 0)} bird directories without "
+              f"windows); missing from the K=2 states {r.get('birds_missing_from_states2', 0)}, from the K=6 states "
+              f"{r.get('birds_missing_from_states6', 0)}; {r.get('birds_without_flight_windows', 0)} birds have no K=2 "
+              f"flight window (K=2 column {meta.get('args', {}).get('state_col', 'state_hmm')}). Cohort = deployment "
+              f"year (reference deploy_on): {r.get('cohort_birds', {})}; first-window year used for "
+              f"{r.get('cohort_from_first_window_year', 0)} birds without deploy_on. Bird-keyed counts: bird_coverage.csv.",
               f"- Flight windows (K=2 state 1): {r['flight_windows']:,} of {r['windows_total']:,} windows, "
               f"{r['flight_birds']} birds ({r['flight_windows_k0']:,} scheduled mode, {r['flight_windows_k1']:,} continuous mode).",
               f"- PCA of unit h on a bird-balanced sample of {r['pca_fit_sample']:,} flight windows. Variance explained "
-              f"by PC1-PC{len(r['variance_explained'])}: " + ", ".join(f"{v:.3f}" for v in r["variance_explained"]) + ".",
+              f"in the fit sample by PC1-PC{len(r['variance_explained'])}: " + ", ".join(f"{v:.3f}" for v in r["variance_explained"]) + ".",
               "", "### A. Axes of flight (descriptive)", "",
-              "| subset | PC | var. expl. | eta2 bird | eta2 month | R2 hour (circ.) | strongest correlates (Spearman) |",
+              "var. expl. is the PC's share of the variance of unit h within that subset's bird-balanced sample.", "",
+              "| subset | PC | var. expl. | eta2 bird | eta2 month | R2 hour (circ.) | strongest correlates in this subset (Spearman, n windows) |",
               "|---|---|---|---|---|---|---|"]
-        for s in r["axis_summary"]:
-            L.append(f"| {s['subset']} | {s['pc']} | {_f(s['variance_explained'], 3)} | {_f(s['eta2_bird'])} | "
-                     f"{_f(s['eta2_month'])} | {_f(s['circ_r2_hour'])} | {s['label']} |")
+        for x in r["axis_summary"]:
+            L.append(f"| {x['subset']} | {x['pc']} | {_f(x['variance_explained'], 3)} | {_f(x['eta2_bird'])} | "
+                     f"{_f(x['eta2_month'])} | {_f(x['circ_r2_hour'])} | {x['label']} |")
         L += ["", "An axis whose strongest correlates are sensitivity_k or acc_samples is a recording-format axis, not "
-              "a flight axis. eta2 bird is the share of the axis variance that lies between birds.", "",
-              "### A. Sex along each axis (TESTED, bird means, permutation between birds, Holm over the rows)", "",
-              "| subset | PC | n f | n m | f - m | Hedges g | p | p Holm |", "|---|---|---|---|---|---|---|---|"]
+              "a flight axis. The same PC can have different correlates in k0 and k1: read each test row with its own "
+              "subset's correlates. eta2 bird is the share of the axis variance that lies between birds.", "",
+              "### A. Sex along each axis (TESTED)", "",
+              f"Bird value = mean of the bird's month means (months with >= {MIN_BM_WINDOWS} windows; birds with >= "
+              f"{MIN_BIRD_WINDOWS} windows in the subset). Statistic = weighted mean of the female-minus-male differences "
+              "within strata deployment year x age group (tagged young / not stated); sex labels permuted between birds "
+              "within strata; birds in strata holding one sex do not enter (n inf.). raw f - m and Hedges g are on all "
+              "birds with known sex. Nuisance AUC = how well the strata alone separate the sexes (>= 0.9: not testable "
+              f"in this design). p at the permutation floor is printed as '<= 1/{n_perm + 1}'. Holm family: all runs x "
+              "subsets x PCs of variant 'all' (primary); variant 'full' (windows with acc_samples >= "
+              f"{FULL_SAMPLES} only) is a sensitivity family with its own Holm.", "",
+              "| variant | subset | PC | axis in this subset | n f | n m | n inf. | nuisance AUC | raw f - m | strat. f - m | "
+              "Hedges g | p | p Holm (family size) |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
         for t in r["sex_tests"]:
-            L.append(f"| {t['subset']} | {t['pc']} | {t['n_f']} | {t['n_m']} | {_f(t.get('diff_f_minus_m'), 3)} | "
-                     f"{_f(t.get('hedges_g'))} | {_f(t.get('p_perm'), 4)} | {_f(t.get('p_holm'), 4)} |")
+            ph, pp = t.get("p_holm"), t.get("p_perm")
+            if pp is not None and np.isfinite(pp) and not t.get("testable"):
+                pstr, hol = "not testable in this design", "-"
+            else:
+                pstr = _fp(pp, n_perm)
+                hol = f"{_f(ph, 4)} ({int(t['holm_family_size'])})" if ph is not None and np.isfinite(ph) else "NA"
+            L.append(f"| {t['variant']} | {t['subset']} | {t['pc']} | {t.get('axis_label', '')} | {t['n_f']} | {t['n_m']} | "
+                     f"{t.get('n_informative', 0)} | {_f(t.get('nuisance_auc'))} | {_f(t.get('diff_f_minus_m'), 3)} | "
+                     f"{_f(t.get('diff_strat'), 3)} | {_f(t.get('hedges_g'))} | {pstr} | {hol} |")
         bo = r["bouts"]
-        L += ["", "### B. Continuous-mode bouts", "", f"- Definition: {bo['bout_definition']}.",
-              f"- Bouts: {bo['bouts_all']:,} in total, {bo['bouts_ge_60s']:,} of at least 60 s from "
+        L += ["", "### B. Continuous-mode bouts", "", f"- Definition (canonical; other modules import flight.bout_ids): {bo['bout_definition']}.",
+              f"- Bouts: {bo['bouts_all']:,} in total, {bo['bouts_ge_60s']:,} of at least {MIN_BOUT_S:g} s from "
               f"{bo['birds_with_bouts']} birds. Duration 10/50/90 % quantiles (s): {bo['duration_s_quantiles']}. "
               "Continuous recording is capped near 900 s, so duration is partly a recording setting."]
+        if bc:
+            c, g = bc["canonical"], bc["legacy"]
+            L += [f"- {bc['birds_with_k1_windows']} of {r['birds']} birds have continuous-mode (k=1) ACC windows; birds "
+                  "without them record only scheduled ACC bursts, so bouts counted from raw 1 Hz GPS (stage 6) include "
+                  "birds that can have no bout here. Per-bird counts under both rules are in bird_coverage.csv.",
+                  f"- Canonical rule: {c['bouts']:,} bouts, {c['bouts_ge_60s']:,} >= 60 s in {c['birds_ge_60s']} birds "
+                  f"(per bird min/median/max {c['per_bird_ge_60s_min_median_max']}). First run's rule (25 s, any "
+                  f"other-mode window splits): {g['bouts']:,} bouts, {g['bouts_ge_60s']:,} >= 60 s in {g['birds_ge_60s']} "
+                  f"birds (per bird {g['per_bird_ge_60s_min_median_max']}). Other-mode windows inside canonical bouts: "
+                  f"{bc['other_mode_windows_inside_bouts']:,}."]
         if "chosen_k" in bo:
             L += [f"- Bout types: rule ({bo['rule']}) gives K = {bo['chosen_k']}"
-                  + (" (no K >= 2 met the rule: bouts are not split into stable types)." if not bo["rule_met_k_gt_1"] else "."),
+                  + (" (no K >= 2 met the rule: bouts are not split into stable types)." if not bo["rule_met_k_gt_1"] else ".")
+                  + f" Bootstrap refits: {bo['n_boot']}.",
                   "", "| K | min Jaccard | presence ok | rule ok |", "|---|---|---|---|"]
             for k in bo["k_table"]:
                 L.append(f"| {k['K']} | {_f(k['jaccard_min'], 3)} | {k['presence_ok']} | {k['rule_ok']} |")
             L += ["", "K=6 states used for shares and transitions (from this run's state_profiles.csv; the K=6 "
                   "partition is itself a fallback choice that did not meet the stability rule):", ""]
-            for s in r["k6_states"]:
-                L.append(f"- state {s['state']}: " + ", ".join(f"{k} {_f(v, 2)}" for k, v in s.items() if k != "state"))
-            L += ["", "Bout types (medians over bouts; words only from fixed numeric rules):", ""]
+            for x in r["k6_states"]:
+                L.append(f"- state {x['state']}: " + ", ".join(f"{k} {_f(v, 2)}" for k, v in x.items() if k != "state"))
+            L += ["", "Bout types (medians over bouts; words only from fixed numeric rules; circles are NET turning / 360, "
+                  "so opposite-direction turns cancel; gross absolute turning is given only as a rate in deg/min because "
+                  "GPS heading noise inflates it):", ""]
             for t in bo["types"]:
-                top = sorted(((t[f'share_state_{s}'], s) for s in range(len(r["k6_states"])) if f"share_state_{s}" in t),
-                             reverse=True)[:2]
+                top = sorted(((t[f'share_state_{x}'], x) for x in range(len(r["k6_states"])) if f"share_state_{x}" in t
+                              and t[f'share_state_{x}'] is not None and np.isfinite(t[f'share_state_{x}'])), reverse=True)[:2]
                 L.append(f"- Type {t['bout_type']} ({t['bouts']} bouts, {t['birds']} birds): {t['words']}. Duration "
                          f"{_f(t['duration_s'], 0)} s, speed {_f(t['speed_mean'], 1)} m/s, net climb "
                          f"{_f(t['net_climb_m'], 0)} m (first half {_f(t['climb_first_half_m'], 0)}, second half "
-                         f"{_f(t['climb_second_half_m'], 0)}), {_f(t['circles_per_min'], 2)} circles/min, glide ratio "
+                         f"{_f(t['climb_second_half_m'], 0)}), {_f(t['circles_per_min'], 2)} net circles/min, gross "
+                         f"turning {_f(t['turn_gross_deg_per_min'], 0)} deg/min, glide ratio "
                          f"{_f(t['glide_ratio'], 1)} (n={t['glide_ratio_n']}), flapping share {_f(t['flap_share'], 2)}, "
-                         f"main states " + ", ".join(f"{s} ({_f(v, 2)})" for v, s in top) +
+                         f"main states " + ", ".join(f"{x} ({_f(v, 2)})" for v, x in top) +
                          f", mean start hour {_f(t['start_hour_circmean'], 1)} solar, share of bouts by young-tagged "
                          f"birds {_f(t['bout_share_young_tagged'], 2)}.")
             if bo["group_tests"]:
-                L += ["", "Bird-level shares of bout types (TESTED per type, exploratory, no correction):", "",
-                      "| type | group | n 1 | n 0 | mean share 1 | mean share 0 | p |", "|---|---|---|---|---|---|---|"]
+                L += ["", "Bird-level shares of bout types (TESTED per type, exploratory, no correction; permutation within "
+                      "deployment year x age group for sex, within deployment year for young-tagged):", "",
+                      "| type | group | n 1 | n 0 | mean share 1 | mean share 0 | nuisance AUC | p |", "|---|---|---|---|---|---|---|---|"]
                 for t in bo["group_tests"]:
                     g1 = "female vs male" if t["group"] == "sex" else "young-tagged vs not stated"
                     L.append(f"| {t['type']} | {g1} | {t['n_1']} | {t['n_0']} | {_f(t['mean_share_1'], 3)} | "
-                             f"{_f(t['mean_share_0'], 3)} | {_f(t.get('p_perm'), 4)} |")
+                             f"{_f(t['mean_share_0'], 3)} | {_f(t.get('nuisance_auc'))} | {_fp(t.get('p_perm'), n_perm)} |")
         elif "note" in bo:
             L.append(f"- {bo['note']}.")
-        L += ["", "Glide ratio is ground distance over height lost in descending windows (climb < -0.5 m/s; ground speed, so wind is "
-              "included); it is NaN below 20 m of height lost.", ""]
+        L += ["", "Height and distance per window use the window's GPS seconds (climb_mean x n_speed, speed_mean x "
+              "n_speed), not 10 s. Glide ratio is ground distance over height lost in descending windows (climb < "
+              "-0.5 m/s; ground speed, so wind is included); it is NaN below 20 m of height lost.", ""]
     if cross is not None and len(cross):
         L += ["## Axes compared between runs (descriptive)", "",
-              "Spearman between the PCs of the two runs on windows that are flight in both "
+              "Spearman between the PCs of the two runs on windows that are flight in both, bird-balanced sample "
               "(cross_run_pc_spearman.csv). Largest |rho| per PC of the first run:", ""]
         c0, c1 = cross.columns[0], cross.columns[1]
         for p, g in cross.groupby(c0):
@@ -910,14 +1214,15 @@ def main(argv=None) -> None:
     ap.add_argument("--states6", type=Path, action="append", required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE)
-    ap.add_argument("--state-col", default="state", help="K=2 column defining flight (state or state_hmm)")
+    ap.add_argument("--state-col", default="state_hmm",
+                    help="K=2 column defining flight (state_hmm, as budgets.py, or state)")
     ap.add_argument("--per-bird", type=int, default=3000)
     ap.add_argument("--umap", action="store_true")
     ap.add_argument("--umap-per-bird", type=int, default=300)
     ap.add_argument("--bout-per-bird", type=int, default=300)
     ap.add_argument("--bout-k-over", type=int, default=20)
     ap.add_argument("--bout-max-k", type=int, default=10)
-    ap.add_argument("--n-boot", type=int, default=20)
+    ap.add_argument("--n-boot", type=int, default=100)
     ap.add_argument("--n-perm", type=int, default=2000)
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
@@ -929,18 +1234,23 @@ def main(argv=None) -> None:
     names = [r.name for r in a.run]
     if len(set(names)) != len(names):
         raise SystemExit("run directories must have different names")
-    birds = sorted(p.name for p in a.windows.iterdir() if p.is_dir())
+    birds = sorted(p.name for p in a.windows.iterdir()
+                   if p.is_dir() and (p / "meta.parquet").exists() and pq.read_metadata(p / "meta.parquet").num_rows > 0)
     meta = {"args": {k: str(v) for k, v in vars(a).items()}, "word_rules": WORD_RULES,
             "constants": {"BOUT_STEP_S": BOUT_STEP_S, "MIN_BOUT_S": MIN_BOUT_S, "GLIDE_MIN_LOSS_M": GLIDE_MIN_LOSS_M,
                           "GLIDE_MIN_SINK_MS": GLIDE_MIN_SINK_MS,
                           "MIN_CELL": MIN_CELL, "MIN_BIRD_WINDOWS": MIN_BIRD_WINDOWS, "MIN_BIRD_BOUTS": MIN_BIRD_BOUTS}}
     if a.reference.exists():
-        birdinfo = reference.load_birds(a.reference, birds).set_index("bird")[["sex", "tagged_young"]]
-        meta["reference_note"] = (f"sex f {int((birdinfo['sex'] == 'f').sum())}, m {int((birdinfo['sex'] == 'm').sum())}, "
-                                  f"missing {int(birdinfo['sex'].isna().sum())}; young-tagged "
-                                  f"{int(birdinfo['tagged_young'].notna().sum())}")
+        birdinfo = reference.load_birds(a.reference, birds).set_index("bird")[["sex", "tagged_young", "deploy_on"]]
+        dy = birdinfo["deploy_on"].dt.year.value_counts().sort_index()
+        meta["reference_note"] = (f"{len(birds)} birds with windows: sex f {int((birdinfo['sex'] == 'f').sum())}, m "
+                                  f"{int((birdinfo['sex'] == 'm').sum())}, missing {int(birdinfo['sex'].isna().sum())}; "
+                                  f"young-tagged {int(birdinfo['tagged_young'].notna().sum())}; deployment year "
+                                  + ", ".join(f"{int(y)}: {n}" for y, n in dy.items())
+                                  + f", missing {int(birdinfo['deploy_on'].isna().sum())}")
     else:
-        birdinfo = pd.DataFrame({"sex": np.nan, "tagged_young": np.nan}, index=pd.Index(birds, name="bird"))
+        birdinfo = pd.DataFrame({"sex": np.nan, "tagged_young": np.nan, "deploy_on": pd.NaT},
+                                index=pd.Index(birds, name="bird"))
         meta["reference_note"] = "reference CSV not found; sex and young-tagged outputs are empty"
     a.out.mkdir(parents=True, exist_ok=True)
     results, keys, Zs = [], [], []
@@ -951,6 +1261,12 @@ def main(argv=None) -> None:
         results.append(r)
         keys.append(k)
         Zs.append(z)
+    holm_family([r["sex_tests"] for r in results])
+    for r in results:
+        o = a.out / r["run"]
+        r["sex_tests"].to_csv(o / "sex_tests_axes.csv", index=False)
+        r["sex_tests"] = r["sex_tests"].to_dict(orient="records")
+        (o / "flight.json").write_text(json.dumps(r, indent=1, default=_json))
     cross = None
     if len(results) == 2:
         cross = cross_run(keys, Zs, names, np.random.default_rng(a.seed))

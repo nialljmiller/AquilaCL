@@ -278,13 +278,18 @@ def profile_bird(
     return sched, cal_rows
 
 
-def common_format(cal: pd.DataFrame, clip_margin_g: float = 0.05) -> dict:
+def common_format(cal: pd.DataFrame, clip_margin_g: float = 0.05, outlier_sd: float = 3.0) -> dict:
     """Common acceleration format that hides the sensitivity setting, from the reliable calibrations.
 
     ``step_g``: the coarsest calibrated step among k=0 periods, max over periods and axes of 1/gain.
     ``clip_g``: the narrowest saturation level among k=1 periods, min over periods and axes of
     min(offset, 4095 - offset) / gain (``saturation_g`` per period), minus ``clip_margin_g``. Only periods with
     ``reliable`` true count; ``<name>_periods`` lists each one's value and ``<name>_set_by`` the deciding one.
+
+    A single doubtful fit should not set the format for every bird (a full fit with a 15% gain error once gave a
+    clip of 1.52 g against 1.90-1.96 g for most periods). Periods more than ``outlier_sd`` robust standard
+    deviations (1.4826 x MAD) beyond the median in the deciding direction are left out of the extreme and listed
+    in ``<name>_excluded``; their own data keep their own step or rail.
     """
     ax = ["x", "y", "z"]
     ok = cal[cal["reliable"].astype(bool)]
@@ -298,7 +303,18 @@ def common_format(cal: pd.DataFrame, clip_margin_g: float = 0.05) -> dict:
             {"bird": r["bird"], "tag": str(r["tag"]), "sensitivity_k": k, "model": r["model"], key: float(value(r))}
             for _, r in ok[ok["sensitivity_k"] == k].iterrows()
         ]
-        best = pick(periods, key=lambda d: d[key]) if periods else None
+        v = np.array([d[key] for d in periods])
+        excluded = []
+        if len(v) >= 5:
+            med = np.median(v)
+            sd = 1.4826 * np.median(np.abs(v - med))
+            far = (v > med + outlier_sd * sd) if pick is max else (v < med - outlier_sd * sd)
+            excluded = [d for d, f in zip(periods, far) if f]
+            periods_used = [d for d, f in zip(periods, far) if not f]
+        else:
+            periods_used = periods
+        best = pick(periods_used, key=lambda d: d[key]) if periods_used else None
+        out[f"{name}_excluded"] = excluded
         out[name] = None if best is None else best[key] - (clip_margin_g if name == "clip_g" else 0.0)
         out[f"{name}_set_by"] = best
         out[f"{name}_periods"] = periods

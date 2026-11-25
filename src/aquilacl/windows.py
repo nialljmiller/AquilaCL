@@ -155,7 +155,8 @@ def build_bird(
         # one fix per (window, second): the one closest to the slot start
         key = widx[ok] * int(window_s) + slot[ok]
         o = np.lexsort((off[ok], key))
-        ok = ok[o][np.r_[True, key[o][1:] != key[o][:-1]]]
+        if len(ok):
+            ok = ok[o][np.r_[True, key[o][1:] != key[o][:-1]]]
         vals = fixes[GPS_CHANNELS].to_numpy(dtype=np.float32)
         fin = np.isfinite(vals)
         gps_arr[widx[ok], slot[ok]] = np.nan_to_num(vals[ok])

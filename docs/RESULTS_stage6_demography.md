@@ -12,7 +12,7 @@ All demographic tests use the bird as the unit: folds are grouped by bird and pe
 Sub-states (job 62227, r6, rule fixed in advance):
 - **Ground splits into 4 stable sub-states** (Jaccard 0.78–0.91):
   - 0.0: very still, GPS absent, 25% at night, sensitivity flag raised, so it may follow recording mode;
-  - 0.1: still, rolled −33°;
+  - 0.1: still, tilted −33° fore-aft (column `roll_rot_deg`, which is fore-aft tilt in this frame; see RESULTS_r7.md);
   - 0.2: low activity, VeDBA 0.02 g;
   - 0.3: active on the ground, VeDBA 0.13 g.
 - **Flight does not split stably at any k_sub.**

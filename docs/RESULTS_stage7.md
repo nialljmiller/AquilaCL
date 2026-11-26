@@ -2,6 +2,8 @@
 
 Data: windows_v4 (92 birds with windows). Models: r6_yaw60_bpb4 (current model) and r4_v4.
 
+Naming note (added after r7): in the r4/r6 roost frame, the column `roll_rot_deg` is the fore-aft (pitch) tilt and `pitch_rot_deg` is the side-to-side (roll) tilt, because the flapping axis is the sensor y axis. See RESULTS_r7.md. The r7 retraining did not replace r6_yaw60_bpb4, so the results below stand.
+
 ## Code and runs
 
 **Final outputs** (under `results_2026-11/v4/` on AI4WY):

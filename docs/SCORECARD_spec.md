@@ -153,3 +153,9 @@ The locked test birds are scored only for the final two or three designs.
   - G9 metric named;
   - circular R² defined;
   - fixed seeds.
+- 2026-11-27 v2.1, before any model was scored. Change based on model-free counts from the scorecard precount:
+  - **What the counts showed.** Scheduled (k=0) bursts are mostly short by design: of 1,896,823 k=0 windows, 1,185,935 have 40 samples, 354,268 have 64 and 354,845 are full. Full daytime k=0 windows exist for only 31 of 72 birds.
+  - **Change 1.** The scheduled-domain rows (G2, G3, G4, G4b, G5, G7c) now use k=0 windows with acc_samples ≥ 40, not ≥ 190.
+  - **Change 2.** Window length is added to the G2 nuisance floor.
+  - **Change 3.** In the G3 floor, the short-window share becomes the per-day share of each length class (40, 64, ≥ 190).
+  - **Unchanged.** The continuous-mode and full-window rows (G6, G9b, G10) keep ≥ 190.

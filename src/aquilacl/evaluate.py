@@ -565,7 +565,7 @@ def _bird_mean_h(H: np.ndarray, codes: np.ndarray, G: int, chunk: int = 500_000)
 
 def sex_flight_probe(meta, H, ref_csv: Path, states2: Path | None = None, state_col: str = "state_hmm",
                      n_perm: int = 200, n_repeats: int = 5, seed: int = 0, workers: int = 1,
-                     min_windows: int = SEX_MIN_WINDOWS, run_name: str = "run") -> dict:
+                     min_windows: int = SEX_MIN_WINDOWS, run_name: str = "run", exclude=()) -> dict:
     """Bird-level sex probe (female = 1) on mean h in flight windows, with a ground-window control.
 
     All birds with known sex (the encoder never saw sex labels); pre-fledge windows of tagged-young birds are
@@ -626,6 +626,8 @@ def sex_flight_probe(meta, H, ref_csv: Path, states2: Path | None = None, state_
 
     sex = ref["sex"].map({"f": 1, "m": 0})
     y = sex.dropna().astype(int)
+    y = y[~y.index.isin(list(exclude))]  # locked test birds of a scorecard split: labels never looked at
+    out.update(birds_excluded=int(len(exclude)))
     out.update(birds_known_sex=int(len(y)), birds_f=int((y == 1).sum()), birds_m=int((y == 0).sum()))
     bcode = pd.Index(ub).get_indexer(birds)
     specs, info = {}, {}
@@ -664,7 +666,9 @@ def r7_probes(run: Path, windows: Path, meta, H, hold, rng, ref_csv=None, states
         out["sex_flight"] = {"skipped": "no --reference"}
     else:
         out["sex_flight"] = sex_flight_probe(meta, H, Path(ref_csv), None if states2 is None else Path(states2), state_col,
-                                             n_perm, n_repeats, seed, workers, run_name=run.name)
+                                             n_perm, n_repeats, seed, workers, run_name=run.name,
+                                             exclude=json.loads((run / "locked.json").read_text())
+                                             if (run / "locked.json").exists() else ())
     return out
 
 

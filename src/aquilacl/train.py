@@ -291,6 +291,9 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--holdout-salt", default="aquilacl", help="salt of the held-out bird hash ('aquilacl' = earlier runs)")
     ap.add_argument("--holdout-exclude", type=Path, default=None,
                     help="JSON list of bird ids that must not be held out (e.g. an earlier run's holdout.json)")
+    ap.add_argument("--split", type=Path, default=None,
+                    help="scorecard split JSON {train, search, locked}: trains on 'train' only, holds out 'search' "
+                         "(holdout.json), never trains on 'locked' (locked.json); overrides the hashed holdout")
     return ap
 
 
@@ -388,9 +391,17 @@ def main(argv=None):
     birds = sorted(data.meta["bird"].unique())
     cohort = data.meta.groupby("bird")["cohort"].first().to_dict()
     exclude = json.loads(cfg.holdout_exclude.read_text()) if cfg.holdout_exclude is not None else None
-    hold = dataset.holdout_birds(birds, cohort, cfg.holdout_per_cohort, salt=cfg.holdout_salt, exclude=exclude)
+    if cfg.split is not None:
+        sp = json.loads(cfg.split.read_text())
+        hold, locked = sorted(sp["search"]), sorted(sp["locked"])
+        if set(sp["train"]) & (set(hold) | set(locked)):
+            raise SystemExit(f"{cfg.split}: train overlaps search or locked")
+        (cfg.run / "locked.json").write_text(json.dumps(locked, indent=1))
+        train_rows = data.meta["bird"].isin(sp["train"]).to_numpy()
+    else:
+        hold = dataset.holdout_birds(birds, cohort, cfg.holdout_per_cohort, salt=cfg.holdout_salt, exclude=exclude)
+        train_rows = ~data.meta["bird"].isin(hold).to_numpy()
     (cfg.run / "holdout.json").write_text(json.dumps(hold, indent=1))
-    train_rows = ~data.meta["bird"].isin(hold).to_numpy()
 
     # whole training set on the device
     tr = np.flatnonzero(train_rows)

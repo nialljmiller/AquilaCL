@@ -444,7 +444,7 @@ def contextual_embed(run_dir, h_by_bird: dict[str, np.ndarray], meta_by_bird: di
     if not ckpts:
         raise SystemExit(f"no checkpoint in {run_dir}")
     c = json.loads((run_dir / "config.json").read_text())
-    ck = torch.load(ckpts[-1], map_location=device)
+    ck = torch.load(ckpts[-1], map_location="cpu")  # standardisation tensors are read with .numpy()
     env = c.get("env") if c.get("env") not in (None, "None") else None
     te = c["time_encoding"]
     S = build_streams(h_by_bird, meta_by_bird, te, env)
